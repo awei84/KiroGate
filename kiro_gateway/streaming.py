@@ -40,6 +40,7 @@ from kiro_gateway.parsers import AwsEventStreamParser, parse_bracket_tool_calls,
 from kiro_gateway.utils import generate_completion_id
 from kiro_gateway.config import settings, get_adaptive_timeout
 from kiro_gateway.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
+from kiro_gateway.thinking_parser import KiroThinkingTagParser, SegmentType, TextSegment
 
 if TYPE_CHECKING:
     from kiro_gateway.auth import KiroAuthManager
@@ -727,10 +728,13 @@ async def stream_kiro_to_anthropic(
     Anthropic использует другой формат событий:
     - message_start: начало сообщения
     - content_block_start: начало блока контента
-    - content_block_delta: дельта контента (text_delta или input_json_delta)
+    - content_block_delta: дельта контента (text_delta, thinking_delta или input_json_delta)
     - content_block_stop: конец блока контента
     - message_delta: финальная информация (stop_reason, usage)
     - message_stop: конец сообщения
+
+    当 thinking_enabled=True 时，会解析 Kiro 返回的 <thinking>...</thinking> 标签，
+    并转换为 Anthropic 官方的 thinking_delta 事件格式。
 
     Args:
         client: HTTP клиент
@@ -750,10 +754,15 @@ async def stream_kiro_to_anthropic(
     parser = AwsEventStreamParser()
     metering_data = None
     context_usage_percentage = None
-    content_parts: list[str] = []  # 使用 list 替代字符串拼接，提升性能
+    content_parts: list[str] = []  # 用于 token 计算的完整内容
+    thinking_parts: list[str] = []  # thinking 内容（用于 token 计算）
+    text_parts: list[str] = []  # 普通文本内容（用于 token 计算）
     content_block_index = 0
+    thinking_block_started = False
     text_block_started = False
-    tool_blocks_started = {}  # tool_id -> index
+
+    # Thinking 解析器（仅在 thinking_enabled 时使用）
+    thinking_parser = KiroThinkingTagParser() if thinking_enabled else None
 
     # 根据模型自适应调整超时时间
     adaptive_stream_read_timeout = get_adaptive_timeout(model, stream_read_timeout)
@@ -765,6 +774,92 @@ async def stream_kiro_to_anthropic(
         pre_calculated_input_tokens += count_message_tokens(request_messages, apply_claude_correction=False)
     if request_tools:
         pre_calculated_input_tokens += count_tools_tokens(request_tools, apply_claude_correction=False)
+
+    async def emit_thinking_segment(content: str) -> AsyncGenerator[str, None]:
+        """发送 thinking 内容的事件"""
+        nonlocal content_block_index, thinking_block_started, thinking_parts
+
+        if not content:
+            return
+
+        thinking_parts.append(content)
+
+        # 如果 thinking block 还没开始，先发送 content_block_start
+        if not thinking_block_started:
+            block_start = {
+                "type": "content_block_start",
+                "index": content_block_index,
+                "content_block": {"type": "thinking", "thinking": ""}
+            }
+            yield f"event: content_block_start\ndata: {json.dumps(block_start, ensure_ascii=False)}\n\n"
+            thinking_block_started = True
+
+        # 发送 thinking_delta
+        delta = {
+            "type": "content_block_delta",
+            "index": content_block_index,
+            "delta": {"type": "thinking_delta", "thinking": content}
+        }
+        yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+
+        if debug_logger:
+            debug_logger.log_modified_chunk(f"event: content_block_delta\ndata: {json.dumps(delta)}\n\n".encode('utf-8'))
+
+    async def close_thinking_block() -> AsyncGenerator[str, None]:
+        """关闭 thinking block"""
+        nonlocal content_block_index, thinking_block_started
+
+        if thinking_block_started:
+            block_stop = {
+                "type": "content_block_stop",
+                "index": content_block_index
+            }
+            yield f"event: content_block_stop\ndata: {json.dumps(block_stop, ensure_ascii=False)}\n\n"
+            content_block_index += 1
+            thinking_block_started = False
+
+    async def emit_text_segment(content: str) -> AsyncGenerator[str, None]:
+        """发送普通文本内容的事件"""
+        nonlocal content_block_index, text_block_started, text_parts
+
+        if not content:
+            return
+
+        text_parts.append(content)
+
+        # 如果 text block 还没开始，先发送 content_block_start
+        if not text_block_started:
+            block_start = {
+                "type": "content_block_start",
+                "index": content_block_index,
+                "content_block": {"type": "text", "text": ""}
+            }
+            yield f"event: content_block_start\ndata: {json.dumps(block_start, ensure_ascii=False)}\n\n"
+            text_block_started = True
+
+        # 发送 text_delta
+        delta = {
+            "type": "content_block_delta",
+            "index": content_block_index,
+            "delta": {"type": "text_delta", "text": content}
+        }
+        yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+
+        if debug_logger:
+            debug_logger.log_modified_chunk(f"event: content_block_delta\ndata: {json.dumps(delta)}\n\n".encode('utf-8'))
+
+    async def close_text_block() -> AsyncGenerator[str, None]:
+        """关闭 text block"""
+        nonlocal content_block_index, text_block_started
+
+        if text_block_started:
+            block_stop = {
+                "type": "content_block_stop",
+                "index": content_block_index
+            }
+            yield f"event: content_block_stop\ndata: {json.dumps(block_stop, ensure_ascii=False)}\n\n"
+            content_block_index += 1
+            text_block_started = False
 
     try:
         # message_start
@@ -787,18 +882,17 @@ async def stream_kiro_to_anthropic(
             }
         }
 
-        
         yield f"event: message_start\ndata: {json.dumps(message_start, ensure_ascii=False)}\n\n"
 
         # Read chunks with adaptive timeout
-        # 对于慢模型和大文档，可能需要更长时间等待每个 chunk
         byte_iterator = response.aiter_bytes()
         consecutive_timeouts = 0
-        max_consecutive_timeouts = 3  # 允许连续超时次数
+        max_consecutive_timeouts = 3
+
         while True:
             try:
                 chunk = await _read_chunk_with_timeout(byte_iterator, adaptive_stream_read_timeout)
-                consecutive_timeouts = 0  # 重置超时计数器
+                consecutive_timeouts = 0
             except StopAsyncIteration:
                 break
             except StreamReadTimeoutError as e:
@@ -824,26 +918,29 @@ async def stream_kiro_to_anthropic(
                     content = event["data"]
                     content_parts.append(content)
 
-                    # Если text block ещё не начат, начинаем его
-                    if not text_block_started:
-                        block_start = {
-                            "type": "content_block_start",
-                            "index": content_block_index,
-                            "content_block": {"type": "text", "text": ""}
-                        }
-                        yield f"event: content_block_start\ndata: {json.dumps(block_start, ensure_ascii=False)}\n\n"
-                        text_block_started = True
+                    if thinking_enabled and thinking_parser:
+                        # 使用 thinking 解析器处理内容
+                        segments = thinking_parser.push_and_parse(content)
 
-                    # Отправляем text_delta
-                    delta = {
-                        "type": "content_block_delta",
-                        "index": content_block_index,
-                        "delta": {"type": "text_delta", "text": content}
-                    }
-                    yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
-
-                    if debug_logger:
-                        debug_logger.log_modified_chunk(f"event: content_block_delta\ndata: {json.dumps(delta)}\n\n".encode('utf-8'))
+                        for segment in segments:
+                            if segment.type == SegmentType.THINKING:
+                                # 如果之前有 text block 打开，先关闭它
+                                async for event_str in close_text_block():
+                                    yield event_str
+                                # 发送 thinking 内容
+                                async for event_str in emit_thinking_segment(segment.content):
+                                    yield event_str
+                            elif segment.type == SegmentType.TEXT:
+                                # 如果之前有 thinking block 打开，先关闭它
+                                async for event_str in close_thinking_block():
+                                    yield event_str
+                                # 发送普通文本
+                                async for event_str in emit_text_segment(segment.content):
+                                    yield event_str
+                    else:
+                        # 不启用 thinking 解析，直接作为文本处理
+                        async for event_str in emit_text_segment(content):
+                            yield event_str
 
                 elif event["type"] == "usage":
                     metering_data = event["data"]
@@ -851,24 +948,36 @@ async def stream_kiro_to_anthropic(
                 elif event["type"] == "context_usage":
                     context_usage_percentage = event["data"]
 
-        # Закрываем text block если был открыт
-        if text_block_started:
-            block_stop = {
-                "type": "content_block_stop",
-                "index": content_block_index
-            }
-            yield f"event: content_block_stop\ndata: {json.dumps(block_stop, ensure_ascii=False)}\n\n"
-            content_block_index += 1
+        # 流结束，刷新 thinking 解析器缓冲区
+        if thinking_enabled and thinking_parser:
+            final_segments = thinking_parser.flush()
+            for segment in final_segments:
+                if segment.type == SegmentType.THINKING:
+                    async for event_str in close_text_block():
+                        yield event_str
+                    async for event_str in emit_thinking_segment(segment.content):
+                        yield event_str
+                elif segment.type == SegmentType.TEXT:
+                    async for event_str in close_thinking_block():
+                        yield event_str
+                    async for event_str in emit_text_segment(segment.content):
+                        yield event_str
 
-        # 合并 content 部分（比字符串拼接更高效）
+        # 关闭所有打开的 blocks
+        async for event_str in close_thinking_block():
+            yield event_str
+        async for event_str in close_text_block():
+            yield event_str
+
+        # 合并 content 部分（用于 token 计算）
         full_content = ''.join(content_parts)
 
-        # Обрабатываем tool calls
+        # 处理 tool calls
         bracket_tool_calls = parse_bracket_tool_calls(full_content)
         all_tool_calls = parser.get_tool_calls() + bracket_tool_calls
         all_tool_calls = deduplicate_tool_calls(all_tool_calls)
 
-        # Отправляем tool_use blocks
+        # 发送 tool_use blocks
         for tc in all_tool_calls:
             func = tc.get("function") or {}
             tool_name = func.get("name") or ""
@@ -880,7 +989,7 @@ async def stream_kiro_to_anthropic(
             except json.JSONDecodeError:
                 tool_input = {}
 
-            # content_block_start для tool_use
+            # content_block_start for tool_use
             tool_block_start = {
                 "type": "content_block_start",
                 "index": content_block_index,
@@ -914,10 +1023,10 @@ async def stream_kiro_to_anthropic(
 
             content_block_index += 1
 
-        # Определяем stop_reason
+        # 确定 stop_reason
         stop_reason = "tool_use" if all_tool_calls else "end_turn"
 
-        # 使用统一的 token 计算函数（消除重复代码）
+        # 计算 token 使用量
         usage_info = _calculate_usage_tokens(
             full_content, context_usage_percentage, model_cache, model,
             request_messages, request_tools
@@ -925,7 +1034,7 @@ async def stream_kiro_to_anthropic(
         input_tokens = usage_info["prompt_tokens"]
         completion_tokens = usage_info["completion_tokens"]
 
-        # Отправляем message_delta
+        # 发送 message_delta
         message_delta = {
             "type": "message_delta",
             "delta": {
@@ -938,18 +1047,24 @@ async def stream_kiro_to_anthropic(
         }
         yield f"event: message_delta\ndata: {json.dumps(message_delta, ensure_ascii=False)}\n\n"
 
-        # Отправляем message_stop
+        # 发送 message_stop
         yield f"event: message_stop\ndata: {{\"type\": \"message_stop\"}}\n\n"
 
-        logger.debug(
-            f"[Anthropic Usage] {model}: input_tokens={input_tokens}, output_tokens={completion_tokens}"
-        )
+        if thinking_enabled and thinking_parser and thinking_parser.has_extracted_thinking:
+            logger.debug(
+                f"[Anthropic Usage with Thinking] {model}: input_tokens={input_tokens}, "
+                f"output_tokens={completion_tokens}, thinking_chars={len(''.join(thinking_parts))}"
+            )
+        else:
+            logger.debug(
+                f"[Anthropic Usage] {model}: input_tokens={input_tokens}, output_tokens={completion_tokens}"
+            )
 
     except Exception as e:
         # 确保错误信息不为空
         error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
         logger.error(f"Error during Anthropic streaming: {error_msg}", exc_info=True)
-        # Отправляем error event
+        # 发送 error event
         error_event = {
             "type": "error",
             "error": {
@@ -971,10 +1086,14 @@ async def collect_anthropic_response(
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
+    thinking_enabled: bool = False,
     stream_read_timeout: float = settings.stream_read_timeout
 ) -> dict:
     """
     Собирает полный ответ из streaming потока и преобразует в формат Anthropic.
+
+    当 thinking_enabled=True 时，会解析 Kiro 返回的 <thinking>...</thinking> 标签，
+    并在响应中添加 thinking content block。
 
     Args:
         client: HTTP клиент
@@ -984,6 +1103,7 @@ async def collect_anthropic_response(
         auth_manager: Менеджер аутентификации
         request_messages: Сообщения запроса
         request_tools: Инструменты запроса
+        thinking_enabled: Включен ли режим thinking
         stream_read_timeout: Stream read timeout for each chunk (seconds)
 
     Returns:
@@ -993,21 +1113,23 @@ async def collect_anthropic_response(
     parser = AwsEventStreamParser()
     metering_data = None
     context_usage_percentage = None
-    content_parts: list[str] = []  # 使用 list 替代字符串拼接，提升性能
+    content_parts: list[str] = []
+
+    # Thinking 解析器（仅在 thinking_enabled 时使用）
+    thinking_parser = KiroThinkingTagParser() if thinking_enabled else None
 
     # 根据模型自适应调整超时时间
     adaptive_stream_read_timeout = get_adaptive_timeout(model, stream_read_timeout)
 
     try:
         # Read chunks with adaptive timeout
-        # 对于慢模型和大文档，可能需要更长时间等待每个 chunk
         byte_iterator = response.aiter_bytes()
         consecutive_timeouts = 0
-        max_consecutive_timeouts = 3  # 允许连续超时次数
+        max_consecutive_timeouts = 3
         while True:
             try:
                 chunk = await _read_chunk_with_timeout(byte_iterator, adaptive_stream_read_timeout)
-                consecutive_timeouts = 0  # 重置超时计数器
+                consecutive_timeouts = 0
             except StopAsyncIteration:
                 break
             except StreamReadTimeoutError as e:
@@ -1039,25 +1161,54 @@ async def collect_anthropic_response(
     finally:
         await response.aclose()
 
-    # 合并 content 部分（比字符串拼接更高效）
+    # 合并 content 部分
     full_content = ''.join(content_parts)
 
-    # Обрабатываем tool calls
+    # 处理 thinking 内容
+    thinking_content = ""
+    text_content = full_content
+
+    if thinking_enabled and thinking_parser:
+        # 使用解析器处理完整内容
+        segments = thinking_parser.push_and_parse(full_content)
+        final_segments = thinking_parser.flush()
+        all_segments = segments + final_segments
+
+        thinking_parts = []
+        text_parts = []
+
+        for segment in all_segments:
+            if segment.type == SegmentType.THINKING:
+                thinking_parts.append(segment.content)
+            elif segment.type == SegmentType.TEXT:
+                text_parts.append(segment.content)
+
+        thinking_content = ''.join(thinking_parts)
+        text_content = ''.join(text_parts)
+
+    # 处理 tool calls
     bracket_tool_calls = parse_bracket_tool_calls(full_content)
     all_tool_calls = parser.get_tool_calls() + bracket_tool_calls
     all_tool_calls = deduplicate_tool_calls(all_tool_calls)
 
-    # Формируем content blocks
+    # 构建 content blocks
     content_blocks = []
 
-    # Добавляем text block если есть контент
-    if full_content:
+    # 添加 thinking block（如果有）
+    if thinking_content:
         content_blocks.append({
-            "type": "text",
-            "text": full_content
+            "type": "thinking",
+            "thinking": thinking_content
         })
 
-    # Добавляем tool_use blocks
+    # 添加 text block（如果有）
+    if text_content:
+        content_blocks.append({
+            "type": "text",
+            "text": text_content
+        })
+
+    # 添加 tool_use blocks
     for tc in all_tool_calls:
         func = tc.get("function") or {}
         tool_name = func.get("name") or ""
@@ -1076,10 +1227,10 @@ async def collect_anthropic_response(
             "input": tool_input
         })
 
-    # Определяем stop_reason
+    # 确定 stop_reason
     stop_reason = "tool_use" if all_tool_calls else "end_turn"
 
-    # 使用统一的 token 计算函数（消除重复代码）
+    # 计算 token 使用量
     usage_info = _calculate_usage_tokens(
         full_content, context_usage_percentage, model_cache, model,
         request_messages, request_tools
@@ -1087,9 +1238,15 @@ async def collect_anthropic_response(
     input_tokens = usage_info["prompt_tokens"]
     completion_tokens = usage_info["completion_tokens"]
 
-    logger.debug(
-        f"[Anthropic Usage] {model}: input_tokens={input_tokens}, output_tokens={completion_tokens}"
-    )
+    if thinking_content:
+        logger.debug(
+            f"[Anthropic Usage with Thinking] {model}: input_tokens={input_tokens}, "
+            f"output_tokens={completion_tokens}, thinking_chars={len(thinking_content)}"
+        )
+    else:
+        logger.debug(
+            f"[Anthropic Usage] {model}: input_tokens={input_tokens}, output_tokens={completion_tokens}"
+        )
 
     return {
         "id": message_id,

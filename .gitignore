@@ -32,3 +32,6 @@ htmlcov/
 
 # Data files
 data/
+
+# Excluded docs
+docs/excdoc/

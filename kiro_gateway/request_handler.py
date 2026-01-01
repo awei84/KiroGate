@@ -34,7 +34,7 @@ from loguru import logger
 
 from kiro_gateway.auth import KiroAuthManager
 from kiro_gateway.cache import ModelInfoCache
-from kiro_gateway.converters import build_kiro_payload, convert_anthropic_to_openai_request
+from kiro_gateway.converters import build_kiro_payload, convert_anthropic_to_openai_request, is_thinking_enabled
 from kiro_gateway.config import settings
 from kiro_gateway.http_client import KiroHttpClient
 from kiro_gateway.models import (
@@ -451,6 +451,7 @@ class RequestHandler:
 
         # 获取 thinking 配置（从原始请求中获取，支持 Anthropic 格式）
         thinking_config = getattr(request_data, 'thinking', None)
+        thinking_enabled = is_thinking_enabled(thinking_config)
 
         # 构建 Kiro payload
         try:
@@ -525,7 +526,7 @@ class RequestHandler:
                         endpoint_name,
                         messages_for_tokenizer,
                         tools_for_tokenizer,
-                        thinking_enabled=getattr(request_data, 'thinking', None) is not None
+                        thinking_enabled=thinking_enabled
                     )
                 else:
                     return await RequestHandler.create_stream_response(
@@ -550,7 +551,8 @@ class RequestHandler:
                         collect_anthropic_response,
                         endpoint_name,
                         messages_for_tokenizer,
-                        tools_for_tokenizer
+                        tools_for_tokenizer,
+                        thinking_enabled=thinking_enabled
                     )
                 else:
                     return await RequestHandler.create_non_stream_response(
