@@ -449,12 +449,16 @@ class RequestHandler:
         # 生成会话 ID
         conversation_id = generate_conversation_id()
 
+        # 获取 thinking 配置（从原始请求中获取，支持 Anthropic 格式）
+        thinking_config = getattr(request_data, 'thinking', None)
+
         # 构建 Kiro payload
         try:
             kiro_payload = build_kiro_payload(
                 openai_request,
                 conversation_id,
-                auth_manager.profile_arn or ""
+                auth_manager.profile_arn or "",
+                thinking_config=thinking_config
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
