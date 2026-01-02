@@ -377,9 +377,7 @@ class KiroAuthManager:
                 # 检查 1：Token 版本判断
                 # 如果传入了 old_token 且当前 token 已经不同，说明已被其他请求刷新过
                 if old_token and self._access_token and old_token != self._access_token:
-                    logger.debug(
-                        f"Skipping refresh (token already changed): old_token={old_token[:20]}..."
-                    )
+                    logger.debug("Skipping refresh (token already changed)")
                     return self._access_token
 
                 # 检查 2：时间防抖（兜底）
