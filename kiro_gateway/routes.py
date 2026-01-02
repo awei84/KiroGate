@@ -2520,15 +2520,16 @@ def _dedupe_tokens(tokens: list[str]) -> list[str]:
 
 async def _read_import_payload(
     file: UploadFile | None,
-    file_path: str | None,
     tokens_text: str | None,
     json_text: str | None,
-    allow_file_path: bool = True
 ) -> tuple[object | None, str | None, int | None]:
+    """
+    Read import payload from file upload or text input.
+
+    Security: file_path parameter has been removed to prevent path traversal attacks.
+    """
     input_count = 0
     if file and file.filename:
-        input_count += 1
-    if file_path and file_path.strip():
         input_count += 1
     if tokens_text and tokens_text.strip():
         input_count += 1
@@ -2536,7 +2537,7 @@ async def _read_import_payload(
         input_count += 1
 
     if input_count == 0:
-        return None, "请提供文件、路径、文本或 JSON 之一", 400
+        return None, "请提供文件或文本", 400
     if input_count > 1:
         return None, "请仅选择一种导入方式", 400
 
@@ -2548,22 +2549,6 @@ async def _read_import_payload(
             return None, "文件过大，请拆分后导入", 400
         try:
             return json.loads(content), None, None
-        except json.JSONDecodeError:
-            return None, "JSON 格式无效", 400
-
-    if file_path and file_path.strip():
-        if not allow_file_path:
-            return None, "不支持 file_path 导入，请使用上传或文本方式", 400
-        path = Path(file_path).expanduser().resolve()
-        project_root = Path(__file__).resolve().parents[1]
-        if project_root not in path.parents and path != project_root:
-            return None, "仅支持导入项目目录下的文件，请使用上传方式", 400
-        if not path.exists() or not path.is_file():
-            return None, "文件不存在", 400
-        if path.stat().st_size > IMPORT_FILE_MAX_BYTES:
-            return None, "文件过大，请拆分后导入", 400
-        try:
-            return json.loads(path.read_text(encoding="utf-8")), None, None
         except json.JSONDecodeError:
             return None, "JSON 格式无效", 400
 
@@ -2739,7 +2724,6 @@ async def user_donate_token(
 async def user_import_tokens(
     request: Request,
     file: UploadFile | None = File(None),
-    file_path: str | None = Form(None),
     tokens_text: str | None = Form(None),
     json_text: str | None = Form(None),
     visibility: str = Form("private"),
@@ -2760,7 +2744,6 @@ async def user_import_tokens(
 
     payload, error, status = await _read_import_payload(
         file=file,
-        file_path=file_path,
         tokens_text=tokens_text,
         json_text=json_text
     )
@@ -2782,7 +2765,6 @@ async def user_import_tokens(
 async def api_import_tokens(
     request: Request,
     file: UploadFile | None = File(None),
-    file_path: str | None = Form(None),
     tokens_text: str | None = Form(None),
     json_text: str | None = Form(None),
     visibility: str = Form("private"),
@@ -2814,10 +2796,8 @@ async def api_import_tokens(
 
     payload, error, status = await _read_import_payload(
         file=file,
-        file_path=file_path,
         tokens_text=tokens_text,
-        json_text=json_text,
-        allow_file_path=False
+        json_text=json_text
     )
     if error:
         return JSONResponse(status_code=status or 400, content={"error": error})

@@ -328,6 +328,7 @@ class Settings(BaseSettings):
     def validate_security_defaults(self) -> "Settings":
         """验证安全配置，警告使用默认密钥。"""
         from loguru import logger
+        import os
 
         insecure_defaults = []
 
@@ -335,14 +336,25 @@ class Settings(BaseSettings):
         if self.admin_password == "admin123":
             insecure_defaults.append("ADMIN_PASSWORD 使用默认值 'admin123'")
 
-        # 检查默认密钥
-        default_keys = {
+        # 检查默认密钥 - 这些是严重安全风险
+        critical_default_keys = {
             "admin_secret_key": "kirogate_admin_secret_key_change_me",
             "user_session_secret": "kirogate_user_secret_change_me",
+        }
+
+        # 非关键默认密钥（仅警告）
+        warning_default_keys = {
             "token_encrypt_key": "kirogate_token_encrypt_key_32b!",
         }
 
-        for key_name, default_value in default_keys.items():
+        critical_issues = []
+        for key_name, default_value in critical_default_keys.items():
+            value = getattr(self, key_name)
+            if value == default_value:
+                critical_issues.append(key_name.upper())
+                insecure_defaults.append(f"{key_name.upper()} 使用默认值（严重安全风险！）")
+
+        for key_name, default_value in warning_default_keys.items():
             value = getattr(self, key_name)
             if value == default_value:
                 insecure_defaults.append(f"{key_name.upper()} 使用默认值（不安全）")
@@ -354,6 +366,24 @@ class Settings(BaseSettings):
                 logger.warning(f"  - {issue}")
             logger.warning("请在生产环境中修改 .env 文件中的相关配置")
             logger.warning("=" * 60)
+
+        # 在生产环境中，如果使用默认的 session 密钥，拒绝启动
+        # 检测生产环境：Docker 容器或非 localhost
+        is_production = (
+            os.environ.get("DOCKER_CONTAINER") == "1" or
+            os.path.exists("/.dockerenv") or
+            (self.oauth_client_id and self.oauth_client_secret) or
+            (self.github_client_id and self.github_client_secret)
+        )
+
+        if is_production and critical_issues:
+            error_msg = (
+                f"安全错误: 生产环境中禁止使用默认密钥！\n"
+                f"请设置以下环境变量: {', '.join(critical_issues)}\n"
+                f"示例: docker run -e USER_SESSION_SECRET=\"$(openssl rand -hex 32)\" ..."
+            )
+            logger.critical(error_msg)
+            raise ValueError(error_msg)
 
         return self
 
