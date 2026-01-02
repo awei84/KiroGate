@@ -51,6 +51,7 @@ class User:
     is_banned: bool
     approval_status: str
     password_hash: Optional[str]
+    session_version: int
     created_at: int
     last_login: Optional[int]
 
@@ -128,6 +129,7 @@ class UserDatabase:
                     is_banned INTEGER DEFAULT 0,
                     approval_status TEXT DEFAULT 'approved',
                     password_hash TEXT,
+                    session_version INTEGER DEFAULT 1,
                     created_at INTEGER NOT NULL,
                     last_login INTEGER
                 );
@@ -235,6 +237,8 @@ class UserDatabase:
                 conn.execute("ALTER TABLE users ADD COLUMN approval_status TEXT DEFAULT 'approved'")
             if "password_hash" not in user_columns:
                 conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+            if "session_version" not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN session_version INTEGER DEFAULT 1")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
             announcement_columns = {row[1] for row in conn.execute("PRAGMA table_info(announcements)")}
             if "allow_guest" not in announcement_columns:
@@ -281,8 +285,8 @@ class UserDatabase:
                 cursor = conn.execute(
                     """INSERT INTO users
                        (linuxdo_id, github_id, email, username, avatar_url, trust_level, approval_status, password_hash,
-                        created_at, last_login)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        session_version, created_at, last_login)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         linuxdo_id,
                         github_id,
@@ -292,6 +296,7 @@ class UserDatabase:
                         trust_level,
                         approval_status,
                         password_hash,
+                        1,  # session_version starts at 1
                         now,
                         now
                     )
@@ -309,6 +314,7 @@ class UserDatabase:
                     is_banned=False,
                     approval_status=approval_status,
                     password_hash=password_hash,
+                    session_version=1,
                     created_at=now,
                     last_login=now
                 )
@@ -671,6 +677,10 @@ class UserDatabase:
 
     def _row_to_user(self, row: sqlite3.Row) -> User:
         """Convert database row to User object."""
+        # Handle session_version for backward compatibility
+        session_version = 1
+        if hasattr(row, "keys") and "session_version" in row.keys():
+            session_version = row["session_version"] or 1
         return User(
             id=row["id"],
             linuxdo_id=row["linuxdo_id"],
@@ -683,9 +693,40 @@ class UserDatabase:
             is_banned=bool(row["is_banned"]),
             approval_status=row["approval_status"] or "approved",
             password_hash=row["password_hash"],
+            session_version=session_version,
             created_at=row["created_at"],
             last_login=row["last_login"]
         )
+
+    def get_session_version(self, user_id: int) -> int:
+        """Get current session version for a user."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT session_version FROM users WHERE id = ?",
+                (user_id,)
+            ).fetchone()
+            if row:
+                return row["session_version"] or 1
+            return 1
+
+    def increment_session_version(self, user_id: int) -> int:
+        """
+        Increment session version for a user, invalidating all existing sessions.
+
+        Returns:
+            New session version
+        """
+        with self._lock:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE users SET session_version = COALESCE(session_version, 0) + 1 WHERE id = ?",
+                    (user_id,)
+                )
+                row = conn.execute(
+                    "SELECT session_version FROM users WHERE id = ?",
+                    (user_id,)
+                ).fetchone()
+                return row["session_version"] if row else 1
 
     # ==================== Token Methods ====================
 

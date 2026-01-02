@@ -2093,8 +2093,16 @@ async def oauth2_callback(request: Request, code: str = None, state: str = None)
 
 
 @router.get("/oauth2/logout", include_in_schema=False)
-async def oauth2_logout():
-    """User logout."""
+async def oauth2_logout(request: Request):
+    """User logout - invalidates all sessions for the user."""
+    from kiro_gateway.user_manager import user_manager
+
+    # Get current user before clearing cookie
+    user = get_current_user(request)
+    if user:
+        # Increment session version to invalidate all existing tokens
+        user_manager.logout(user.id)
+
     response = RedirectResponse(url="/", status_code=303)
     response.delete_cookie(key="user_session")
     return response

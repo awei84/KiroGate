@@ -37,13 +37,27 @@ class UserSessionManager:
         self._serializer = URLSafeTimedSerializer(settings.user_session_secret)
         self._oauth_states: dict[str, int] = {}  # state -> timestamp
 
-    def create_session(self, user_id: int) -> str:
-        """Create a signed session token for user."""
-        return self._serializer.dumps({"user_id": user_id})
+    def create_session(self, user_id: int, session_version: int = 1) -> str:
+        """
+        Create a signed session token for user.
+
+        Args:
+            user_id: User ID
+            session_version: Current session version from database
+
+        Returns:
+            Signed session token containing user_id and session_version
+        """
+        return self._serializer.dumps({
+            "user_id": user_id,
+            "session_version": session_version
+        })
 
     def verify_session(self, token: str) -> Optional[int]:
         """
         Verify session token and return user_id if valid.
+
+        Checks both token signature/expiry AND session_version against database.
 
         Returns:
             user_id if valid, None otherwise
@@ -52,7 +66,19 @@ class UserSessionManager:
             return None
         try:
             data = self._serializer.loads(token, max_age=settings.user_session_max_age)
-            return data.get("user_id")
+            user_id = data.get("user_id")
+            token_version = data.get("session_version", 1)
+
+            if not user_id:
+                return None
+
+            # Verify session version against database
+            current_version = user_db.get_session_version(user_id)
+            if token_version != current_version:
+                logger.debug(f"Session version mismatch for user {user_id}: token={token_version}, db={current_version}")
+                return None
+
+            return user_id
         except (BadSignature, SignatureExpired):
             return None
 
@@ -316,7 +342,7 @@ class UserManager:
             logger.info(f"New user registered: {username} (LinuxDo ID: {linuxdo_id})")
 
         # Create session
-        session_token = self.session.create_session(user.id)
+        session_token = self.session.create_session(user.id, user.session_version)
         return user, session_token
 
     async def github_login(self, code: str) -> Tuple[Optional[User], Optional[str]]:
@@ -376,7 +402,7 @@ class UserManager:
             logger.info(f"New user registered via GitHub: {username} (GitHub ID: {github_id})")
 
         # Create session
-        session_token = self.session.create_session(user.id)
+        session_token = self.session.create_session(user.id, user.session_version)
         return user, session_token
 
     def get_current_user(self, session_token: str) -> Optional[User]:
@@ -418,7 +444,7 @@ class UserManager:
         )
         if approval_status != "approved":
             return None, "注册成功，等待审核"
-        session_token = self.session.create_session(user.id)
+        session_token = self.session.create_session(user.id, user.session_version)
         return user, session_token
 
     def login_with_email(self, email: str, password: str) -> Tuple[Optional[User], Optional[str]]:
@@ -436,11 +462,23 @@ class UserManager:
         if user.approval_status != "approved":
             return None, "账号审核中" if user.approval_status == "pending" else "账号已被拒绝"
         user_db.update_last_login(user.id)
-        session_token = self.session.create_session(user.id)
+        session_token = self.session.create_session(user.id, user.session_version)
         return user, session_token
 
-    def logout(self, session_token: str) -> bool:
-        """Logout user (session invalidation is handled by cookie deletion)."""
+    def logout(self, user_id: int) -> bool:
+        """
+        Logout user by incrementing session version.
+
+        This invalidates all existing session tokens for the user.
+
+        Args:
+            user_id: User ID to logout
+
+        Returns:
+            True on success
+        """
+        user_db.increment_session_version(user_id)
+        logger.info(f"User {user_id} logged out, session version incremented")
         return True
 
 
