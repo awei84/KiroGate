@@ -645,6 +645,216 @@ async def get_api_metrics():
     return metrics.get_deno_compatible_metrics()
 
 
+# ============================================================================
+# Kiro Portal API - 账号信息查询
+# ============================================================================
+
+import cbor2
+
+KIRO_PORTAL_API_BASE = "https://app.kiro.dev/service/KiroWebPortalService/operation"
+
+
+async def kiro_portal_api_request(operation: str, body: dict, access_token: str, idp: str = "BuilderId") -> dict:
+    """调用 Kiro Portal API (使用 CBOR 格式)"""
+    import uuid
+
+    headers = {
+        "accept": "application/cbor",
+        "content-type": "application/cbor",
+        "smithy-protocol": "rpc-v2-cbor",
+        "amz-sdk-invocation-id": str(uuid.uuid4()),
+        "amz-sdk-request": "attempt=1; max=1",
+        "x-amz-user-agent": "aws-sdk-js/1.0.0 kirogate/1.0.0",
+        "authorization": f"Bearer {access_token}",
+        "cookie": f"Idp={idp}; AccessToken={access_token}",
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{KIRO_PORTAL_API_BASE}/{operation}",
+            headers=headers,
+            content=cbor2.dumps(body),
+            timeout=30.0
+        )
+
+        if not response.is_success:
+            error_message = f"HTTP {response.status_code}"
+            try:
+                error_data = cbor2.loads(response.content)
+                if error_data.get("__type") and error_data.get("message"):
+                    error_type = error_data["__type"].split("#")[-1]
+                    error_message = f"{error_type}: {error_data['message']}"
+                elif error_data.get("message"):
+                    error_message = error_data["message"]
+            except Exception:
+                pass
+            raise HTTPException(status_code=response.status_code, detail=error_message)
+
+        return cbor2.loads(response.content)
+
+
+async def get_kiro_account_info(access_token: str, idp: str = "BuilderId") -> dict:
+    """获取账号使用量和订阅信息
+
+    Args:
+        access_token: Kiro access token
+        idp: 身份提供商，可选值: BuilderId, Github, Google
+             如果不确定，会自动尝试多个 idp
+    """
+    import time
+    import asyncio
+
+    # 尝试的 idp 列表（按常见程度排序）
+    idp_list = [idp] if idp != "BuilderId" else ["Github", "Google", "BuilderId"]
+
+    last_error = None
+    usage_data = None
+    for try_idp in idp_list:
+        try:
+            usage_data = await kiro_portal_api_request(
+                "GetUserUsageAndLimits",
+                {"isEmailRequired": True, "origin": "KIRO_IDE"},
+                access_token,
+                try_idp
+            )
+            # 成功了，使用这个 idp 继续
+            idp = try_idp
+            break
+        except HTTPException as e:
+            last_error = e
+            # 如果是认证错误，尝试下一个 idp
+            if e.status_code in (401, 403) and try_idp != idp_list[-1]:
+                logger.debug(f"idp={try_idp} failed, trying next...")
+                continue
+            raise
+    else:
+        # 所有 idp 都失败了
+        if last_error:
+            raise last_error
+        raise HTTPException(status_code=401, detail="Authentication failed with all idp options")
+
+    # 获取用户状态（用于检测封禁）
+    user_status = "Active"
+    try:
+        user_info = await kiro_portal_api_request(
+            "GetUserInfo",
+            {"origin": "KIRO_IDE"},
+            access_token,
+            idp
+        )
+        user_status = user_info.get("status", "Active")
+    except Exception as e:
+        logger.warning(f"Failed to get user info: {e}")
+        # 如果获取失败，检查错误信息判断是否封禁
+        error_msg = str(e)
+        if "AccountSuspendedException" in error_msg or "423" in error_msg:
+            user_status = "Suspended"
+
+    # 解析 Credits 使用量
+    credit_usage = None
+    for item in usage_data.get("usageBreakdownList", []):
+        if item.get("resourceType") == "CREDIT":
+            credit_usage = item
+            break
+
+    subscription_title = usage_data.get("subscriptionInfo", {}).get("subscriptionTitle", "Free")
+
+    # 规范化订阅类型
+    subscription_type = "Free"
+    upper_title = subscription_title.upper()
+    if "PRO_PLUS" in upper_title or "PRO+" in upper_title:
+        subscription_type = "Pro_Plus"
+    elif "PRO" in upper_title:
+        subscription_type = "Pro"
+    elif "ENTERPRISE" in upper_title:
+        subscription_type = "Enterprise"
+    elif "TEAMS" in upper_title:
+        subscription_type = "Teams"
+
+    # 基础额度
+    base_limit = credit_usage.get("usageLimitWithPrecision") or credit_usage.get("usageLimit", 0) if credit_usage else 0
+    base_current = credit_usage.get("currentUsageWithPrecision") or credit_usage.get("currentUsage", 0) if credit_usage else 0
+
+    # 试用额度
+    free_trial_limit = 0
+    free_trial_current = 0
+    free_trial_expiry = None
+    if credit_usage and credit_usage.get("freeTrialInfo", {}).get("freeTrialStatus") == "ACTIVE":
+        ft_info = credit_usage["freeTrialInfo"]
+        free_trial_limit = ft_info.get("usageLimitWithPrecision") or ft_info.get("usageLimit", 0)
+        free_trial_current = ft_info.get("currentUsageWithPrecision") or ft_info.get("currentUsage", 0)
+        free_trial_expiry = ft_info.get("freeTrialExpiry")
+
+    # 奖励额度
+    bonuses = []
+    if credit_usage and credit_usage.get("bonuses"):
+        for bonus in credit_usage["bonuses"]:
+            if bonus.get("status") == "ACTIVE":
+                bonuses.append({
+                    "code": bonus.get("bonusCode", ""),
+                    "name": bonus.get("displayName", ""),
+                    "current": bonus.get("currentUsageWithPrecision") or bonus.get("currentUsage", 0),
+                    "limit": bonus.get("usageLimitWithPrecision") or bonus.get("usageLimit", 0),
+                    "expiresAt": bonus.get("expiresAt"),
+                })
+
+    total_limit = base_limit + free_trial_limit + sum(b["limit"] for b in bonuses)
+    total_current = base_current + free_trial_current + sum(b["current"] for b in bonuses)
+
+    # 计算剩余天数
+    days_remaining = None
+    expires_at = None
+    next_reset_date = usage_data.get("nextDateReset")
+    if next_reset_date:
+        from datetime import datetime
+        try:
+            reset_time = datetime.fromisoformat(next_reset_date.replace("Z", "+00:00"))
+            expires_at = int(reset_time.timestamp() * 1000)
+            days_remaining = max(0, (reset_time.timestamp() - time.time()) / 86400)
+            days_remaining = int(days_remaining) + 1
+        except Exception:
+            pass
+
+    return {
+        "email": usage_data.get("userInfo", {}).get("email"),
+        "userId": usage_data.get("userInfo", {}).get("userId"),
+        "status": user_status,  # Active, Suspended 等
+        "subscription": {
+            "type": subscription_type,
+            "title": subscription_title,
+            "rawType": usage_data.get("subscriptionInfo", {}).get("type"),
+            "expiresAt": expires_at,
+            "daysRemaining": days_remaining,
+            "upgradeCapability": usage_data.get("subscriptionInfo", {}).get("upgradeCapability"),
+            "overageCapability": usage_data.get("subscriptionInfo", {}).get("overageCapability"),
+            "managementTarget": usage_data.get("subscriptionInfo", {}).get("subscriptionManagementTarget"),
+        },
+        "usage": {
+            "current": total_current,
+            "limit": total_limit,
+            "percentUsed": (total_current / total_limit * 100) if total_limit > 0 else 0,
+            "baseLimit": base_limit,
+            "baseCurrent": base_current,
+            "freeTrialLimit": free_trial_limit,
+            "freeTrialCurrent": free_trial_current,
+            "freeTrialExpiry": free_trial_expiry,
+            "bonuses": bonuses,
+            "nextResetDate": next_reset_date,
+            "resourceDetail": {
+                "resourceType": credit_usage.get("resourceType") if credit_usage else None,
+                "displayName": credit_usage.get("displayName") if credit_usage else None,
+                "displayNamePlural": credit_usage.get("displayNamePlural") if credit_usage else None,
+                "currency": credit_usage.get("currency") if credit_usage else None,
+                "unit": credit_usage.get("unit") if credit_usage else None,
+                "overageRate": credit_usage.get("overageRate") if credit_usage else None,
+                "overageCap": credit_usage.get("overageCap") if credit_usage else None,
+                "overageEnabled": usage_data.get("overageConfiguration", {}).get("overageEnabled"),
+            } if credit_usage else None,
+        },
+        "lastUpdated": int(time.time() * 1000),
+    }
+
+
 @router.get("/metrics/prometheus")
 async def get_prometheus_metrics():
     """
@@ -2399,6 +2609,12 @@ async def user_get_tokens(
                 "success_rate": round(t.success_rate * 100, 1),
                 "last_used": t.last_used,
                 "created_at": t.created_at,
+                # 账号信息缓存
+                "account_email": t.account_email,
+                "account_status": t.account_status,
+                "account_usage": t.account_usage,
+                "account_limit": t.account_limit,
+                "account_checked_at": t.account_checked_at,
             }
             for t in tokens
         ],
@@ -2863,6 +3079,58 @@ async def user_delete_token(
     from kiro_gateway.database import user_db
     success = user_db.delete_token(token_id, user.id)
     return {"success": success}
+
+
+@router.get("/user/api/tokens/{token_id}/account-info", include_in_schema=False)
+async def user_get_token_account_info(
+    request: Request,
+    token_id: int,
+):
+    """获取指定 Token 的账号信息（订阅、额度等）"""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    from kiro_gateway.database import user_db
+
+    # 验证 Token 所有权
+    token = user_db.get_token_by_id(token_id)
+    if not token or token.user_id != user.id:
+        return JSONResponse(status_code=404, content={"error": "Token 不存在"})
+
+    # 获取解密后的 refresh_token
+    refresh_token = user_db.get_decrypted_token(token_id)
+    if not refresh_token:
+        return JSONResponse(status_code=400, content={"error": "无法获取 Token"})
+
+    # 使用 refresh_token 获取 access_token
+    from kiro_gateway.auth import KiroAuthManager
+    auth_manager = KiroAuthManager(refresh_token)
+    try:
+        access_token = await auth_manager.get_access_token()
+        if not access_token:
+            return JSONResponse(status_code=400, content={"error": "Token 无效或已过期"})
+    except Exception as e:
+        logger.error(f"Failed to get access token for token {token_id}: {e}")
+        return JSONResponse(status_code=400, content={"error": f"Token 验证失败: {str(e)}"})
+
+    # 获取账号信息
+    try:
+        account_info = await get_kiro_account_info(access_token)
+        # 更新缓存
+        user_db.update_token_account_info(
+            token_id,
+            email=account_info.get("email"),
+            status=account_info.get("status"),
+            usage=account_info.get("usage", {}).get("current"),
+            limit=account_info.get("usage", {}).get("limit")
+        )
+        return account_info
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except Exception as e:
+        logger.error(f"Failed to get account info for token {token_id}: {e}")
+        return JSONResponse(status_code=500, content={"error": f"获取账号信息失败: {str(e)}"})
 
 
 @router.get("/user/api/keys", include_in_schema=False)

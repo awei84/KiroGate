@@ -69,6 +69,12 @@ class DonatedToken:
     last_used: Optional[int]
     last_check: Optional[int]
     created_at: int
+    # 账号信息缓存
+    account_email: Optional[str] = None
+    account_status: Optional[str] = None
+    account_usage: Optional[float] = None
+    account_limit: Optional[float] = None
+    account_checked_at: Optional[int] = None
 
     @property
     def success_rate(self) -> float:
@@ -245,6 +251,18 @@ class UserDatabase:
                 conn.execute(
                     "ALTER TABLE announcements ADD COLUMN allow_guest INTEGER DEFAULT 0"
                 )
+            # 添加 token 账号信息缓存字段
+            token_columns = {row[1] for row in conn.execute("PRAGMA table_info(tokens)")}
+            if "account_email" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_email TEXT")
+            if "account_status" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_status TEXT")
+            if "account_usage" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_usage REAL")
+            if "account_limit" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_limit REAL")
+            if "account_checked_at" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_checked_at INTEGER")
             conn.commit()
         logger.info(f"User database initialized: {self._db_path}")
 
@@ -996,8 +1014,37 @@ class UserDatabase:
             fail_count=row["fail_count"],
             last_used=row["last_used"],
             last_check=row["last_check"],
-            created_at=row["created_at"]
+            created_at=row["created_at"],
+            account_email=row["account_email"] if "account_email" in row.keys() else None,
+            account_status=row["account_status"] if "account_status" in row.keys() else None,
+            account_usage=row["account_usage"] if "account_usage" in row.keys() else None,
+            account_limit=row["account_limit"] if "account_limit" in row.keys() else None,
+            account_checked_at=row["account_checked_at"] if "account_checked_at" in row.keys() else None,
         )
+
+    def update_token_account_info(
+        self,
+        token_id: int,
+        email: Optional[str] = None,
+        status: Optional[str] = None,
+        usage: Optional[float] = None,
+        limit: Optional[float] = None
+    ) -> bool:
+        """Update cached account info for a token."""
+        import time
+        with self._lock:
+            with self._get_conn() as conn:
+                conn.execute(
+                    """UPDATE tokens SET
+                       account_email = ?,
+                       account_status = ?,
+                       account_usage = ?,
+                       account_limit = ?,
+                       account_checked_at = ?
+                       WHERE id = ?""",
+                    (email, status, usage, limit, int(time.time()), token_id)
+                )
+                return conn.total_changes > 0
 
     # ==================== API Key Methods ====================
 

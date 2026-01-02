@@ -4379,11 +4379,14 @@ def render_user_page(user) -> str:
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('status')">状态 ↕</th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('success_rate')">成功率 ↕</th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('last_used')">最后使用 ↕</th>
+                  <th class="text-left py-3 px-3">账号</th>
+                  <th class="text-left py-3 px-3">额度</th>
+                  <th class="text-left py-3 px-3">检测时间</th>
                   <th class="text-left py-3 px-3">操作</th>
                 </tr>
               </thead>
               <tbody id="tokenTable">
-                <tr><td colspan="7" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+                <tr><td colspan="10" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
               </tbody>
             </table>
           </div>
@@ -4590,6 +4593,24 @@ def render_user_page(user) -> str:
       <div class="flex justify-center gap-3">
         <button onclick="handleConfirm(false)" class="px-4 py-2 rounded-lg" style="background: var(--bg-input); border: 1px solid var(--border);">取消</button>
         <button onclick="handleConfirm(true)" id="confirmBtn" class="px-4 py-2 rounded-lg text-white" style="background: #ef4444;">确认</button>
+      </div>
+    </div>
+  </div>
+  <!-- 账号信息弹窗 -->
+  <div id="accountInfoModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" style="display: none;">
+    <div class="card w-full max-w-md mx-4">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-bold">📊 账号信息</h3>
+        <button onclick="hideAccountInfoModal()" class="text-2xl leading-none" style="color: var(--text-muted);">&times;</button>
+      </div>
+      <div id="accountInfoContent">
+        <div class="text-center py-8" style="color: var(--text-muted);">
+          <div class="animate-spin inline-block w-6 h-6 border-2 border-current border-t-transparent rounded-full mb-2"></div>
+          <p>加载中...</p>
+        </div>
+      </div>
+      <div class="flex justify-end mt-4">
+        <button onclick="hideAccountInfoModal()" class="btn-primary px-4 py-2">关闭</button>
       </div>
     </div>
   </div>
@@ -4958,7 +4979,7 @@ def render_user_page(user) -> str:
     function renderTokenTable(tokens) {{
       const tb = document.getElementById('tokenTable');
       if (!tokens || !tokens.length) {{
-        tb.innerHTML = '<tr><td colspan="7" class="py-8 text-center" style="color: var(--text-muted);"><div class="mb-3">还没有 Token，先添加一个吧</div><button type="button" onclick="showDonateModal()" class="btn-primary text-sm px-3 py-1.5">+ 添加 Token</button></td></tr>';
+        tb.innerHTML = '<tr><td colspan="10" class="py-8 text-center" style="color: var(--text-muted);"><div class="mb-3">还没有 Token，先添加一个吧</div><button type="button" onclick="showDonateModal()" class="btn-primary text-sm px-3 py-1.5">+ 添加 Token</button></td></tr>';
         document.getElementById('tokensPagination').style.display = 'none';
         document.getElementById('selectAllTokens').checked = false;
         return;
@@ -4970,6 +4991,17 @@ def render_user_page(user) -> str:
         const toggleBtn = canToggle
           ? `<button onclick="toggleVisibility(${{t.id}}, '${{toggleTarget}}')" class="text-xs px-2 py-1 rounded bg-indigo-500/20 text-indigo-400 mr-1">${{toggleLabel}}</button>`
           : '';
+        // 账号信息显示
+        const acctStatus = t.account_status;
+        const acctStatusHtml = acctStatus
+          ? (acctStatus === 'Active' ? '<span class="text-green-400">正常</span>' : '<span class="text-red-400">封禁</span>')
+          : '<span style="color: var(--text-muted);">-</span>';
+        const acctUsage = (t.account_usage !== null && t.account_limit !== null)
+          ? `${{t.account_usage.toFixed(1)}}/${{t.account_limit.toFixed(1)}}`
+          : '-';
+        const acctChecked = t.account_checked_at
+          ? new Date(t.account_checked_at * 1000).toLocaleString()
+          : '-';
         return `
           <tr class="table-row">
             <td class="py-3 px-3">
@@ -4980,7 +5012,11 @@ def render_user_page(user) -> str:
             <td class="py-3 px-3">${{renderTokenStatus(t.status)}}</td>
             <td class="py-3 px-3">${{formatSuccessRate(t.success_rate)}}</td>
             <td class="py-3 px-3">${{t.last_used ? new Date(t.last_used).toLocaleString() : '-'}}</td>
+            <td class="py-3 px-3">${{acctStatusHtml}}</td>
+            <td class="py-3 px-3" style="color: var(--text-muted);">${{acctUsage}}</td>
+            <td class="py-3 px-3" style="color: var(--text-muted); font-size: 0.75rem;">${{acctChecked}}</td>
             <td class="py-3 px-3">
+              <button onclick="showTokenAccountInfo(${{t.id}})" class="text-xs px-2 py-1 rounded bg-cyan-500/20 text-cyan-400 mr-1">账户详情</button>
               ${{toggleBtn}}
               <button onclick="deleteToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button>
             </td>
@@ -5512,6 +5548,146 @@ def render_user_page(user) -> str:
       await fetch('/user/api/tokens/' + tokenId, {{ method: 'DELETE' }});
       loadTokens();
       loadProfile();
+    }}
+
+    // 账号信息弹窗相关函数
+    function showAccountInfoModal() {{
+      document.getElementById('accountInfoModal').style.display = 'flex';
+    }}
+
+    function hideAccountInfoModal() {{
+      document.getElementById('accountInfoModal').style.display = 'none';
+    }}
+
+    function renderAccountInfo(data) {{
+      const content = document.getElementById('accountInfoContent');
+
+      // 账号状态
+      const status = data.status || 'Active';
+      const isSuspended = status !== 'Active';
+      const statusColor = isSuspended ? 'text-red-400' : 'text-green-400';
+      const statusText = isSuspended ? '已封禁' : '正常';
+
+      // 订阅类型颜色
+      const subTypeColors = {{
+        'Pro_Plus': 'text-purple-400',
+        'Pro': 'text-indigo-400',
+        'Enterprise': 'text-amber-400',
+        'Teams': 'text-blue-400',
+        'Free': 'text-gray-400'
+      }};
+      const subColor = subTypeColors[data.subscription?.type] || 'text-gray-400';
+
+      // 计算使用百分比
+      const usage = data.usage || {{}};
+      const percentUsed = usage.percentUsed || 0;
+      const progressColor = percentUsed > 80 ? 'bg-red-500' : percentUsed > 50 ? 'bg-amber-500' : 'bg-green-500';
+
+      // 格式化奖励额度
+      let bonusHtml = '';
+      if (usage.bonuses && usage.bonuses.length > 0) {{
+        bonusHtml = usage.bonuses.map(b => `
+          <div class="flex justify-between text-sm py-1">
+            <span style="color: var(--text-muted);">${{b.name || b.code || '奖励额度'}}</span>
+            <span>${{(b.current || 0).toFixed(1)}} / ${{(b.limit || 0).toFixed(1)}}</span>
+          </div>
+        `).join('');
+      }}
+
+      // 剩余天数显示
+      const daysRemaining = data.subscription?.daysRemaining;
+      const daysHtml = (daysRemaining !== undefined && daysRemaining !== null)
+        ? `<span class="text-sm" style="color: var(--text-muted);">剩余 <strong class="text-amber-400">${{daysRemaining}}</strong> 天</span>`
+        : '';
+
+      content.innerHTML = `
+        <div class="space-y-4">
+          <!-- 账号状态 -->
+          <div class="p-3 rounded-lg flex items-center justify-between" style="background: var(--bg-input);">
+            <div>
+              <div class="text-sm mb-1" style="color: var(--text-muted);">邮箱</div>
+              <div class="font-medium">${{data.email || '-'}}</div>
+            </div>
+            <div class="text-right">
+              <div class="text-sm mb-1" style="color: var(--text-muted);">状态</div>
+              <div class="font-bold ${{statusColor}}">${{statusText}}</div>
+            </div>
+          </div>
+
+          <!-- 订阅信息 -->
+          <div class="p-3 rounded-lg" style="background: var(--bg-input);">
+            <div class="text-sm mb-2" style="color: var(--text-muted);">订阅信息</div>
+            <div class="flex items-center justify-between">
+              <span class="font-bold ${{subColor}}">${{data.subscription?.title || 'Free'}}</span>
+              ${{daysHtml}}
+            </div>
+          </div>
+
+          <!-- 额度使用 -->
+          <div class="p-3 rounded-lg" style="background: var(--bg-input);">
+            <div class="text-sm mb-2" style="color: var(--text-muted);">额度使用</div>
+            <div class="flex justify-between mb-2">
+              <span>已使用 <strong>${{(usage.current || 0).toFixed(1)}}</strong></span>
+              <span>总额度 <strong>${{(usage.limit || 0).toFixed(1)}}</strong></span>
+            </div>
+            <div class="w-full h-2 rounded-full" style="background: var(--bg-card);">
+              <div class="h-full rounded-full ${{progressColor}}" style="width: ${{Math.min(percentUsed, 100)}}%;"></div>
+            </div>
+            <div class="text-right text-sm mt-1" style="color: var(--text-muted);">${{percentUsed.toFixed(1)}}%</div>
+          </div>
+
+          <!-- 额度明细 -->
+          <div class="p-3 rounded-lg" style="background: var(--bg-input);">
+            <div class="text-sm mb-2" style="color: var(--text-muted);">额度明细</div>
+            <div class="flex justify-between text-sm py-1">
+              <span style="color: var(--text-muted);">基础额度</span>
+              <span>${{(usage.baseCurrent || 0).toFixed(1)}} / ${{(usage.baseLimit || 0).toFixed(1)}}</span>
+            </div>
+            ${{bonusHtml}}
+          </div>
+
+          <!-- 更新时间 -->
+          <div class="text-xs text-right" style="color: var(--text-muted);">
+            更新于 ${{data.lastUpdated ? new Date(data.lastUpdated).toLocaleString() : '-'}}
+          </div>
+        </div>
+      `;
+    }}
+
+    function renderAccountInfoError(error) {{
+      const content = document.getElementById('accountInfoContent');
+      content.innerHTML = `
+        <div class="text-center py-6">
+          <div class="text-4xl mb-3">❌</div>
+          <p class="text-red-400 mb-2">获取账号信息失败</p>
+          <p class="text-sm" style="color: var(--text-muted);">${{error}}</p>
+        </div>
+      `;
+    }}
+
+    async function showTokenAccountInfo(tokenId) {{
+      // 显示弹窗并重置为加载状态
+      document.getElementById('accountInfoContent').innerHTML = `
+        <div class="text-center py-8" style="color: var(--text-muted);">
+          <div class="animate-spin inline-block w-6 h-6 border-2 border-current border-t-transparent rounded-full mb-2"></div>
+          <p>加载中...</p>
+        </div>
+      `;
+      showAccountInfoModal();
+
+      try {{
+        const response = await fetch('/user/api/tokens/' + tokenId + '/account-info');
+        const data = await response.json();
+
+        if (!response.ok) {{
+          renderAccountInfoError(data.error || '未知错误');
+          return;
+        }}
+
+        renderAccountInfo(data);
+      }} catch (e) {{
+        renderAccountInfoError(e.message || '网络错误');
+      }}
     }}
 
     async function generateKey() {{
