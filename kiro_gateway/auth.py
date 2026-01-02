@@ -28,6 +28,7 @@ Manages access token lifecycle:
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -93,6 +94,7 @@ class KiroAuthManager:
         self._access_token: Optional[str] = None
         self._expires_at: Optional[datetime] = None
         self._lock = asyncio.Lock()
+        self._last_refresh_time: float = 0  # 上次刷新时间戳（防抖用）
 
         # Dynamic URLs based on region
         self._refresh_url = get_kiro_refresh_url(region)
@@ -322,6 +324,7 @@ class KiroAuthManager:
         if new_profile_arn:
             self._profile_arn = new_profile_arn
         self._expires_at = new_expires_at
+        self._last_refresh_time = time.time()  # 记录刷新时间
 
         logger.info(f"Token refreshed, expires: {self._expires_at.isoformat()}")
 
@@ -349,14 +352,28 @@ class KiroAuthManager:
 
     async def force_refresh(self) -> str:
         """
-        Force token refresh.
+        Force token refresh with debounce protection.
 
         Used when receiving 403 error from API.
+        Includes debounce logic to prevent concurrent refresh race conditions:
+        - If token was refreshed within last 5 seconds, skip refresh and return current token
+        - This prevents multiple concurrent 403 handlers from invalidating each other's tokens
 
         Returns:
             New access token
         """
         async with self._lock:
+            # 防抖：如果最近 5 秒内刚刷新过，跳过刷新
+            # 这可以防止并发请求同时收到 403 后互相覆盖 token
+            debounce_seconds = 5
+            time_since_refresh = time.time() - self._last_refresh_time
+
+            if time_since_refresh < debounce_seconds and self._access_token:
+                logger.debug(
+                    f"Skipping refresh (debounce): last refresh was {time_since_refresh:.1f}s ago"
+                )
+                return self._access_token
+
             await self._refresh_token_request()
             return self._access_token
 
