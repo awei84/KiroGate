@@ -350,29 +350,48 @@ class KiroAuthManager:
 
             return self._access_token
 
-    async def force_refresh(self) -> str:
+    async def force_refresh(self, old_token: Optional[str] = None, force: bool = False) -> str:
         """
-        Force token refresh with debounce protection.
+        Force token refresh with version check and debounce protection.
 
         Used when receiving 403 error from API.
-        Includes debounce logic to prevent concurrent refresh race conditions:
-        - If token was refreshed within last 5 seconds, skip refresh and return current token
-        - This prevents multiple concurrent 403 handlers from invalidating each other's tokens
+
+        Protection mechanisms (skipped if force=True):
+        1. Token version check: If old_token is provided and current token differs,
+           skip refresh (another request already refreshed it)
+        2. Time debounce: If token was refreshed within last 5 seconds, skip refresh
+
+        This prevents concurrent 403 handlers from invalidating each other's tokens.
+
+        Args:
+            old_token: The token that caused 403 error. If provided and differs from
+                      current token, refresh will be skipped.
+            force: If True, skip all protection checks and force refresh.
+                  Used for admin manual refresh.
 
         Returns:
-            New access token
+            Current valid access token
         """
         async with self._lock:
-            # 防抖：如果最近 5 秒内刚刷新过，跳过刷新
-            # 这可以防止并发请求同时收到 403 后互相覆盖 token
-            debounce_seconds = 5
-            time_since_refresh = time.time() - self._last_refresh_time
+            if not force:
+                # 检查 1：Token 版本判断
+                # 如果传入了 old_token 且当前 token 已经不同，说明已被其他请求刷新过
+                if old_token and self._access_token and old_token != self._access_token:
+                    logger.debug(
+                        f"Skipping refresh (token already changed): old_token={old_token[:20]}..."
+                    )
+                    return self._access_token
 
-            if time_since_refresh < debounce_seconds and self._access_token:
-                logger.debug(
-                    f"Skipping refresh (debounce): last refresh was {time_since_refresh:.1f}s ago"
-                )
-                return self._access_token
+                # 检查 2：时间防抖（兜底）
+                # 如果最近 5 秒内刚刷新过，跳过刷新
+                debounce_seconds = 5
+                time_since_refresh = time.time() - self._last_refresh_time
+
+                if time_since_refresh < debounce_seconds and self._access_token:
+                    logger.debug(
+                        f"Skipping refresh (debounce): last refresh was {time_since_refresh:.1f}s ago"
+                    )
+                    return self._access_token
 
             await self._refresh_token_request()
             return self._access_token

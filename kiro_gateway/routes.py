@@ -1245,7 +1245,7 @@ async def admin_refresh_token(
     try:
         auth_manager = getattr(request.app.state, "auth_manager", None)
         if auth_manager:
-            await auth_manager.force_refresh()
+            await auth_manager.force_refresh(force=True)  # 管理员手动刷新，跳过防抖
             return {"success": True, "message": "Token 刷新成功"}
         return {"success": False, "message": "认证管理器不可用"}
     except Exception as e:

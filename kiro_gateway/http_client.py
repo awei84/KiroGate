@@ -222,7 +222,8 @@ class KiroHttpClient:
                 if response.status_code == 403:
                     logger.warning(f"Received 403, refreshing token (attempt {attempt + 1}/{max_retries})")
                     await response.aclose()
-                    await self.auth_manager.force_refresh()
+                    # 传递当前使用的 token，让 force_refresh 判断是否需要刷新
+                    await self.auth_manager.force_refresh(old_token=token)
                     continue
 
                 # 429 - Rate limited, wait and retry
