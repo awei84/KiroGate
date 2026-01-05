@@ -376,17 +376,20 @@ def merge_adjacent_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
 def build_kiro_history(messages: List[ChatMessage], model_id: str) -> List[Dict[str, Any]]:
     """
     Строит массив history для Kiro API из OpenAI messages.
-    
+
     Kiro API ожидает чередование userInputMessage и assistantResponseMessage.
     Эта функция преобразует OpenAI формат в Kiro формат.
-    
+
+    注意：历史消息中的图片会被替换为占位符，以避免请求体过大。
+    只有当前消息（最后一条）的图片会被保留。
+
     Args:
         messages: Список сообщений в формате OpenAI
         model_id: Внутренний ID модели Kiro
-    
+
     Returns:
         Список словарей для поля history в Kiro API
-    
+
     Example:
         >>> msgs = [ChatMessage(role="user", content="Hello")]
         >>> history = build_kiro_history(msgs, "claude-sonnet-4")
@@ -394,40 +397,48 @@ def build_kiro_history(messages: List[ChatMessage], model_id: str) -> List[Dict[
         'Hello'
     """
     history = []
-    
+
     for msg in messages:
         if msg.role == "user":
+            # 提取文本内容
             content = extract_text_content(msg.content)
-            
+
+            # 检查历史消息中是否有图片，用占位符替代
+            _, image_count = extract_images_from_content(msg.content)
+            if image_count > 0:
+                image_placeholder = f"\n[此消息包含 {image_count} 张图片，已在历史记录中省略]"
+                content = content + image_placeholder if content else image_placeholder
+                logger.debug(f"Replaced {image_count} image(s) with placeholder in history message")
+
             user_input = {
                 "content": content,
                 "modelId": model_id,
                 "origin": "AI_EDITOR",
             }
-            
+
             # Обработка tool_results (ответы на tool calls)
             tool_results = _extract_tool_results(msg.content)
             if tool_results:
                 user_input["userInputMessageContext"] = {"toolResults": tool_results}
-            
+
             history.append({"userInputMessage": user_input})
-            
+
         elif msg.role == "assistant":
             content = extract_text_content(msg.content)
-            
+
             assistant_response = {"content": content}
-            
+
             # Обработка tool_calls
             tool_uses = _extract_tool_uses(msg)
             if tool_uses:
                 assistant_response["toolUses"] = tool_uses
-            
+
             history.append({"assistantResponseMessage": assistant_response})
-            
+
         elif msg.role == "system":
             # System prompt обрабатывается отдельно в build_kiro_payload
             pass
-    
+
     return history
 
 
