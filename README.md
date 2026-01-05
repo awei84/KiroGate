@@ -20,6 +20,23 @@
 
 ---
 
+## 🆕 本 Fork 的新增功能
+
+相比上游项目，本 Fork 新增/改进了以下功能：
+
+| 功能 | 说明 |
+|------|------|
+| **图片支持** | 支持 OpenAI (`image_url`) 和 Anthropic (`image`) 格式的图片输入 |
+| **历史消息图片压缩** | 历史消息中的图片自动替换为占位符，避免请求体过大 |
+| **Extended Thinking** | 完整支持 Claude 的扩展思考模式 |
+| **Token 管理增强** | Token 管理页面添加账户详情功能 |
+| **Token 刷新防抖** | 防止并发请求导致的 Token 刷新竞争问题 |
+| **安全修复** | 修复 session 伪造、路径遍历等安全漏洞 |
+| **用户系统** | 支持 LinuxDo/GitHub OAuth2 登录、Token 捐献、API Key 生成 |
+| **Admin 管理后台** | 用户管理、Token 池管理、IP 黑名单等 |
+
+---
+
 ## ✨ 功能特性
 
 | 功能 | 说明 |
@@ -71,36 +88,26 @@ python main.py
 
 ### Docker 部署
 
+> **注意**: 本 Fork 不提供预构建的 Docker 镜像，请自行构建部署。
+
 ```bash
-# 方式一: 使用预构建镜像（推荐）
+# 本地构建运行
+docker build -t kirogate .
 docker run -d -p 8000:8000 \
   -e PROXY_API_KEY="your-password" \
+  -e ADMIN_PASSWORD="your-admin-password" \
+  -e ADMIN_SECRET_KEY="your-random-secret" \
   -v kirogate_data:/app/data \
-  --name kirogate \
-  ghcr.io/dext7r/kirogate:main
+  --name kirogate kirogate
 
-# 方式二: 使用 docker-compose
+# 或使用 docker-compose
 cp .env.example .env
 # 编辑 .env 填写你的凭证
 docker-compose up -d
 
-# 方式三: 本地构建运行
-docker build -t kirogate .
-docker run -d -p 8000:8000 \
-  -e PROXY_API_KEY="your-password" \
-  -v kirogate_data:/app/data \
-  --name kirogate kirogate
-
 # 查看日志
 docker logs -f kirogate
 ```
-
-**镜像标签说明：**
-| 标签 | 说明 |
-|------|------|
-| `ghcr.io/dext7r/kirogate:main` | 最新 main 分支构建 |
-| `ghcr.io/dext7r/kirogate:v1.0.0` | 指定版本（推荐生产使用） |
-| `ghcr.io/dext7r/kirogate:<sha>` | 指定 commit 构建 |
 
 ### Fly.io 部署
 
