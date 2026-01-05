@@ -857,7 +857,7 @@ def _extract_anthropic_system_prompt(system: Optional[Any]) -> str:
 
 def _convert_anthropic_content_to_openai(
     content: Any,
-    role: str
+    _role: str  # noqa: ARG001 - 保留参数以备将来使用
 ) -> Tuple[Optional[Union[str, List[Dict[str, Any]]]], Optional[List[Dict[str, Any]]], Optional[str]]:
     """
     Преобразует Anthropic content в формат OpenAI.
@@ -956,8 +956,16 @@ def _convert_anthropic_content_to_openai(
                 }
                 tool_results.append(tool_result)
 
-    # Если есть tool_results, возвращаем их как content (для обработки в merge_adjacent_messages)
+    # 如果有 tool_results，需要同时保留文本内容
+    # 修复：即使有工具结果也不丢弃用户文本
     if tool_results:
+        # 如果同时有文本内容，将文本和 tool_results 合并
+        if text_parts:
+            text_content = "\n".join(text_parts)
+            # 创建包含文本和 tool_results 的混合内容
+            combined_content = [{"type": "text", "text": text_content}]
+            combined_content.extend(tool_results)
+            return combined_content, None, None
         return tool_results, None, None
 
     # 如果有图片，返回原始内容块列表以保留图片数据
@@ -1018,8 +1026,10 @@ def convert_anthropic_messages_to_openai(
         role = msg.role
         content, tool_calls, _ = _convert_anthropic_content_to_openai(msg.content, role)
 
-        # Если content - это tool_results, создаем user сообщение с ними
-        if isinstance(content, list) and content and isinstance(content[0], dict) and content[0].get("type") == "tool_result":
+        # Если content содержит tool_results, создаем user сообщение с ними
+        if isinstance(content, list) and content and any(
+            isinstance(c, dict) and c.get("type") == "tool_result" for c in content
+        ):
             openai_messages.append(ChatMessage(
                 role="user",
                 content=content
