@@ -149,18 +149,18 @@ def inject_thinking_hint(system_prompt: str, thinking_config: Optional[Union[Dic
 def extract_text_content(content: Any) -> str:
     """
     Извлекает текстовый контент из различных форматов.
-    
+
     OpenAI API поддерживает несколько форматов content:
     - Строка: "Hello, world!"
     - Список: [{"type": "text", "text": "Hello"}]
     - None: пустое сообщение
-    
+
     Args:
         content: Контент в любом поддерживаемом формате
-    
+
     Returns:
         Извлечённый текст или пустая строка
-    
+
     Example:
         >>> extract_text_content("Hello")
         'Hello'
@@ -185,6 +185,88 @@ def extract_text_content(content: Any) -> str:
                 text_parts.append(item)
         return "".join(text_parts)
     return str(content)
+
+
+def extract_images_from_content(content: Any) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    从消息内容中提取图片。
+
+    支持 OpenAI 和 Anthropic 格式的图片：
+    - OpenAI: {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+    - Anthropic: {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}
+
+    Args:
+        content: 消息内容（可以是字符串、列表或 None）
+
+    Returns:
+        Tuple[List[Dict], int]: (Kiro 格式的图片列表, 图片数量)
+        Kiro 格式: {"format": "png", "source": {"bytes": "base64数据"}}
+    """
+    if content is None or isinstance(content, str):
+        return [], 0
+
+    if not isinstance(content, list):
+        return [], 0
+
+    images = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+
+        item_type = item.get("type")
+
+        # OpenAI 格式: {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+        if item_type == "image_url":
+            image_url = item.get("image_url", {})
+            url = image_url.get("url", "")
+
+            # 解析 data URL
+            if url.startswith("data:"):
+                # 格式: data:image/png;base64,xxxxx
+                try:
+                    header, data = url.split(",", 1)
+                    # 提取 media_type，例如 "image/png"
+                    media_type = header.split(":")[1].split(";")[0]
+                    # 提取格式，例如 "png"
+                    img_format = media_type.split("/")[1] if "/" in media_type else "png"
+
+                    images.append({
+                        "format": img_format,
+                        "source": {
+                            "bytes": data
+                        }
+                    })
+                    logger.debug(f"Extracted OpenAI image: format={img_format}")
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"Failed to parse OpenAI image URL: {e}")
+            else:
+                # 外部 URL - 目前不支持，记录警告
+                logger.warning(f"External image URLs are not supported: {url[:50]}...")
+
+        # Anthropic 格式: {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}
+        elif item_type == "image":
+            source = item.get("source", {})
+            source_type = source.get("type")
+
+            if source_type == "base64":
+                media_type = source.get("media_type", "image/png")
+                data = source.get("data", "")
+
+                # 提取格式
+                img_format = media_type.split("/")[1] if "/" in media_type else "png"
+
+                images.append({
+                    "format": img_format,
+                    "source": {
+                        "bytes": data
+                    }
+                })
+                logger.debug(f"Extracted Anthropic image: format={img_format}")
+            elif source_type == "url":
+                # URL 类型 - 目前不支持
+                logger.warning(f"Image URLs are not supported: {source.get('url', '')[:50]}...")
+
+    return images, len(images)
 
 
 def merge_adjacent_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
@@ -617,7 +699,14 @@ def build_kiro_payload(
         "modelId": model_id,
         "origin": "AI_EDITOR",
     }
-    
+
+    # 提取当前消息中的图片（仅当当前消息是 user 消息时）
+    if current_message.role == "user":
+        images, image_count = extract_images_from_content(current_message.content)
+        if images:
+            user_input_message["images"] = images
+            logger.info(f"Added {image_count} image(s) to current message")
+
     # Добавляем tools и tool_results если есть
     # Используем обработанные tools (с короткими descriptions)
     user_input_context = _build_user_input_context(request_data, current_message, processed_tools)
@@ -758,7 +847,7 @@ def _extract_anthropic_system_prompt(system: Optional[Any]) -> str:
 def _convert_anthropic_content_to_openai(
     content: Any,
     role: str
-) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]], Optional[str]]:
+) -> Tuple[Optional[Union[str, List[Dict[str, Any]]]], Optional[List[Dict[str, Any]]], Optional[str]]:
     """
     Преобразует Anthropic content в формат OpenAI.
 
@@ -767,7 +856,8 @@ def _convert_anthropic_content_to_openai(
         role: Роль сообщения (user или assistant)
 
     Returns:
-        Tuple из (text_content, tool_calls, tool_call_id)
+        Tuple из (text_content_or_content_list, tool_calls, tool_call_id)
+        如果内容包含图片，返回原始内容列表以保留图片数据
     """
     if isinstance(content, str):
         return content, None, None
@@ -778,6 +868,8 @@ def _convert_anthropic_content_to_openai(
     text_parts = []
     tool_calls = []
     tool_results = []
+    has_images = False
+    content_blocks = []  # 保留原始内容块（用于图片）
 
     for block in content:
         if isinstance(block, dict):
@@ -785,15 +877,13 @@ def _convert_anthropic_content_to_openai(
 
             if block_type == "text":
                 text_parts.append(block.get("text", ""))
+                content_blocks.append(block)
 
             elif block_type == "image":
-                # Image content - для Kiro нужно будет обработать отдельно
-                # Пока добавляем placeholder
-                source = block.get("source", {})
-                if source.get("type") == "base64":
-                    text_parts.append(f"[Image: {source.get('media_type', 'image')}]")
-                elif source.get("type") == "url":
-                    text_parts.append(f"[Image URL: {source.get('url', '')}]")
+                # 保留图片数据，不转换为占位符
+                has_images = True
+                content_blocks.append(block)
+                logger.debug(f"Preserving Anthropic image block")
 
             elif block_type == "tool_use":
                 # Assistant's tool call
@@ -822,11 +912,20 @@ def _convert_anthropic_content_to_openai(
                 thinking_text = block.get("thinking", "")
                 if thinking_text:
                     text_parts.append(f"<thinking>{thinking_text}</thinking>")
+                    content_blocks.append({"type": "text", "text": f"<thinking>{thinking_text}</thinking>"})
 
         elif isinstance(block, AnthropicContentBlock):
             # Pydantic model
             if block.type == "text":
                 text_parts.append(block.text or "")
+                content_blocks.append({"type": "text", "text": block.text or ""})
+            elif block.type == "image":
+                # 保留图片数据
+                has_images = True
+                content_blocks.append({
+                    "type": "image",
+                    "source": block.source
+                })
             elif block.type == "tool_use":
                 tool_call = {
                     "id": block.id or "",
@@ -846,12 +945,15 @@ def _convert_anthropic_content_to_openai(
                 }
                 tool_results.append(tool_result)
 
-    text_content = "\n".join(text_parts) if text_parts else None
-
     # Если есть tool_results, возвращаем их как content (для обработки в merge_adjacent_messages)
     if tool_results:
         return tool_results, None, None
 
+    # 如果有图片，返回原始内容块列表以保留图片数据
+    if has_images:
+        return content_blocks, tool_calls if tool_calls else None, None
+
+    text_content = "\n".join(text_parts) if text_parts else None
     return text_content, tool_calls if tool_calls else None, None
 
 
