@@ -20,42 +20,13 @@
 
 ---
 
-## 📦 如何使用本 Fork 版本
+## ⚠️ 重要提示
 
-> ⚠️ **重要**: 本项目是上游项目的 Fork 增强版，**不提供预构建的 Docker 镜像**。
+> 本项目是 [kiro-openai-gateway](https://github.com/Jwadow/kiro-openai-gateway) 的 **Fork 增强版**，**不提供预构建的 Docker 镜像**。
 > 
-> 如果你直接执行网上看到的 `docker run ... kirogate` 命令，可能会拉取到其他项目的镜像，而非本 Fork 版本！
-
-**使用本 Fork 版本的正确方式：**
-
-```bash
-# 1. 克隆本仓库
-git clone https://github.com/awei84/KiroGate.git
-cd KiroGate
-
-# 2. 选择以下任一方式部署：
-
-# 方式 A：使用 docker-compose（推荐）
-cp .env.example .env
-# 编辑 .env 填写配置
-docker-compose up -d
-
-# 方式 B：手动构建 Docker 镜像
-docker build -t kirogate .
-docker run -d -p 8000:8000 \
-  -e PROXY_API_KEY="your-password" \
-  -e ADMIN_PASSWORD="your-admin-password" \
-  -e ADMIN_SECRET_KEY="your-random-secret" \
-  -v kirogate_data:/app/data \
-  --name kirogate kirogate
-
-# 方式 C：直接运行 Python
-pip install -r requirements.txt
-cp .env.example .env
-python main.py
-```
-
-详细配置请参考下方的 [配置说明](#%EF%B8%8F-配置说明) 部分。
+> 如果你直接执行 `docker run ... kirogate` 命令，可能会拉取到其他项目的镜像，而非本 Fork 版本！
+> 
+> **正确做法**：先克隆本仓库，再本地构建。详见 [快速开始](#-快速开始)。
 
 ---
 
@@ -128,45 +99,35 @@ python main.py
 
 ### Docker 部署
 
-> ⚠️ **重要提示**: 本 Fork 版本**不提供预构建的 Docker 镜像**，你需要自行克隆仓库并构建镜像。
-> 
-> 如果你直接执行 `docker run ... kirogate` 可能会拉取到其他项目的镜像，而非本 Fork 版本！
-
-#### 方式一：本地构建（推荐）
+> ⚠️ **注意**: 本 Fork 版本**不提供预构建的 Docker 镜像**，请先克隆仓库再构建。
 
 ```bash
-# 1. 克隆本仓库
+# 如果还没克隆仓库，先执行：
 git clone https://github.com/awei84/KiroGate.git
 cd KiroGate
+```
 
-# 2. 构建镜像
+#### 方式一：docker-compose（推荐）
+
+```bash
+cp .env.example .env
+# 编辑 .env 填写你的凭证
+docker-compose up -d
+
+# 查看日志
+docker logs -f kirogate
+```
+
+#### 方式二：手动构建
+
+```bash
 docker build -t kirogate .
-
-# 3. 运行容器
 docker run -d -p 8000:8000 \
   -e PROXY_API_KEY="your-password" \
   -e ADMIN_PASSWORD="your-admin-password" \
   -e ADMIN_SECRET_KEY="your-random-secret" \
   -v kirogate_data:/app/data \
   --name kirogate kirogate
-```
-
-#### 方式二：使用 docker-compose（推荐）
-
-```bash
-# 1. 克隆本仓库
-git clone https://github.com/awei84/KiroGate.git
-cd KiroGate
-
-# 2. 配置环境变量
-cp .env.example .env
-# 编辑 .env 填写你的凭证
-
-# 3. 启动服务
-docker-compose up -d
-
-# 查看日志
-docker logs -f kirogate
 ```
 
 ### Fly.io 部署
