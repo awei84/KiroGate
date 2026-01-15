@@ -42,6 +42,8 @@ docker run -d -p 8000:8000 \
 
 | 功能 | 说明 |
 |------|------|
+| **WebSearch 工具支持** | 🆕 支持 Anthropic 官方的 web_search 工具，通过 Kiro MCP API 实现 |
+| **HTTP/SOCKS5 代理** | 🆕 支持配置代理服务器访问 Kiro API |
 | **图片支持** | 支持 OpenAI (`image_url`) 和 Anthropic (`image`) 格式的图片输入 |
 | **历史消息图片压缩** | 历史消息中的图片自动替换为占位符，避免请求体过大 |
 | **Extended Thinking** | 完整支持 Claude 的扩展思考模式 |
@@ -311,6 +313,28 @@ STATIC_ASSETS_PROXY_BASE="https://proxy.jhun.edu.kg"
 - ✅ **国内服务器**：保持 `STATIC_ASSETS_PROXY_ENABLED=true`（默认）
 - ✅ **国外服务器/Fly.io**：设置 `STATIC_ASSETS_PROXY_ENABLED=false`
 - ✅ **自定义代理**：修改 `STATIC_ASSETS_PROXY_BASE` 地址
+
+### HTTP/SOCKS5 代理配置
+
+如果需要通过代理服务器访问 Kiro API，可以配置以下环境变量：
+
+```env
+# 代理服务器 URL（支持 HTTP 和 SOCKS5）
+# HTTP 代理示例
+PROXY_URL="http://127.0.0.1:7890"
+
+# SOCKS5 代理示例
+PROXY_URL="socks5://127.0.0.1:1080"
+
+# 代理认证（可选）
+PROXY_USERNAME="your_username"
+PROXY_PASSWORD="your_password"
+```
+
+**注意事项：**
+- 代理配置对所有 Kiro API 请求生效
+- SOCKS5 代理需要安装 `httpx[socks]` 依赖：`pip install httpx[socks]`
+- 代理认证信息会自动嵌入到代理 URL 中
 
 ### 获取 Refresh Token
 

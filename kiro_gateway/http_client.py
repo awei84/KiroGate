@@ -22,10 +22,12 @@ HTTP 客户端管理器。
 
 全局 HTTP 客户端连接池管理，提高性能。
 支持自适应超时，针对慢模型（如 Opus）自动调整。
+支持 HTTP/SOCKS5 代理配置。
 """
 
 import asyncio
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
@@ -34,6 +36,35 @@ from loguru import logger
 from kiro_gateway.auth import KiroAuthManager
 from kiro_gateway.config import settings, get_adaptive_timeout
 from kiro_gateway.utils import get_kiro_headers
+
+
+def _build_proxy_url() -> Optional[str]:
+    """
+    构建代理 URL。
+
+    如果配置了代理认证信息，将其嵌入到 URL 中。
+
+    Returns:
+        代理 URL 或 None
+    """
+    if not settings.proxy_url:
+        return None
+
+    proxy_url = settings.proxy_url.strip()
+    if not proxy_url:
+        return None
+
+    # 如果有用户名和密码，嵌入到 URL 中
+    if settings.proxy_username and settings.proxy_password:
+        parsed = urlparse(proxy_url)
+        # 重新构建带认证的 URL
+        auth = f"{settings.proxy_username}:{settings.proxy_password}"
+        if parsed.port:
+            proxy_url = f"{parsed.scheme}://{auth}@{parsed.hostname}:{parsed.port}"
+        else:
+            proxy_url = f"{parsed.scheme}://{auth}@{parsed.hostname}"
+
+    return proxy_url
 
 
 class GlobalHTTPClientManager:
@@ -54,6 +85,7 @@ class GlobalHTTPClientManager:
         Get or create HTTP client.
 
         Note: Timeout should be set per-request, not here, since the client is reused.
+        Supports HTTP/SOCKS5 proxy configuration via PROXY_URL setting.
 
         Returns:
             HTTP client instance
@@ -66,13 +98,27 @@ class GlobalHTTPClientManager:
                     keepalive_expiry=60.0  # Increased from 30.0 for long-running connections
                 )
 
+                # 构建代理配置
+                proxy_url = _build_proxy_url()
+                proxy_config = None
+                if proxy_url:
+                    # httpx 支持 HTTP 和 SOCKS5 代理
+                    # HTTP: http://host:port 或 http://user:pass@host:port
+                    # SOCKS5: socks5://host:port 或 socks5://user:pass@host:port
+                    proxy_config = proxy_url
+                    logger.info(f"HTTP 客户端使用代理: {settings.proxy_url}")
+
                 self._client = httpx.AsyncClient(
                     timeout=None,  # Timeout set per-request
                     follow_redirects=True,
                     limits=limits,
-                    http2=False
+                    http2=False,
+                    proxy=proxy_config
                 )
-                logger.debug("Created new global HTTP client with connection pool")
+                if proxy_config:
+                    logger.debug("Created new global HTTP client with proxy and connection pool")
+                else:
+                    logger.debug("Created new global HTTP client with connection pool")
 
             return self._client
 

@@ -110,6 +110,20 @@ class Settings(BaseSettings):
     kiro_creds_file: str = Field(default="", alias="KIRO_CREDS_FILE")
 
     # ==================================================================================================
+    # HTTP/SOCKS5 代理设置
+    # ==================================================================================================
+
+    # 代理 URL（支持 HTTP 和 SOCKS5）
+    # 示例: http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
+    proxy_url: str = Field(default="", alias="PROXY_URL")
+
+    # 代理用户名（可选）
+    proxy_username: str = Field(default="", alias="PROXY_USERNAME")
+
+    # 代理密码（可选）
+    proxy_password: str = Field(default="", alias="PROXY_PASSWORD")
+
+    # ==================================================================================================
     # Token 设置
     # ==================================================================================================
 
@@ -524,7 +538,7 @@ AVAILABLE_MODELS: List[str] = [
 # Version Info
 # ==================================================================================================
 
-APP_VERSION: str = "2.1.0"
+APP_VERSION: str = "2.2.0"
 APP_TITLE: str = "KiroGate"
 APP_DESCRIPTION: str = "OpenAI & Anthropic compatible Kiro API gateway. Based on kiro-openai-gateway by Jwadow"
 

@@ -972,6 +972,7 @@ async def anthropic_messages(
 
     Accepts Anthropic format requests and converts to Kiro API.
     Supports streaming and non-streaming modes.
+    Also supports WebSearch tool requests via Kiro MCP API.
 
     Args:
         request: FastAPI Request for accessing app.state
@@ -990,6 +991,15 @@ async def anthropic_messages(
     # Store auth_manager and model in request state for RequestHandler and metrics
     request.state.auth_manager = auth_manager
     request.state.model = request_data.model
+
+    # 检查是否为 WebSearch 请求
+    try:
+        from kiro_gateway.websearch import has_web_search_tool, handle_websearch_request
+        if has_web_search_tool(request_data):
+            logger.info(f"[{get_timestamp()}] 检测到 WebSearch 工具，路由到 WebSearch 处理")
+            return await handle_websearch_request(request, request_data, auth_manager)
+    except ImportError:
+        pass  # websearch 模块不可用，继续正常处理
 
     return await RequestHandler.process_request(
         request,
