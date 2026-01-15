@@ -2828,14 +2828,20 @@ def _extract_refresh_tokens(payload: object) -> tuple[list[TokenCredential], int
             client_secret=client_secret if auth_type == "idc" else None,
         ))
 
+    def _has_refresh_token(obj: dict) -> bool:
+        """检查对象是否包含 refreshToken（支持驼峰和蛇形命名）"""
+        if "refreshToken" in obj or "refresh_token" in obj:
+            return True
+        creds = obj.get("credentials") or obj.get("credentials_kiro_rs")
+        if isinstance(creds, dict) and ("refreshToken" in creds or "refresh_token" in creds):
+            return True
+        return False
+
     def handle_list(items: list, path: str, enforce_required: bool) -> None:
         for index, item in enumerate(items):
             item_path = f"{path}[{index}]"
             if isinstance(item, dict):
-                if "refreshToken" in item or (
-                    isinstance(item.get("credentials"), dict)
-                    and "refreshToken" in item["credentials"]
-                ):
+                if _has_refresh_token(item):
                     add_credential(item, item_path)
                 else:
                     if enforce_required:
@@ -2850,10 +2856,8 @@ def _extract_refresh_tokens(payload: object) -> tuple[list[TokenCredential], int
                     record_missing(item_path, "类型不支持")
 
     def handle_dict(obj: dict, path: str) -> None:
-        # 检查顶层是否有 refreshToken
-        if "refreshToken" in obj:
-            add_credential(obj, path if path else "root")
-        if isinstance(obj.get("credentials"), dict) and "refreshToken" in obj["credentials"]:
+        # 检查顶层是否有 refreshToken（支持两种命名）
+        if _has_refresh_token(obj):
             add_credential(obj, path if path else "root")
 
         for key, value in obj.items():
