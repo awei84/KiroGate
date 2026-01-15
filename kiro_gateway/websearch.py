@@ -46,7 +46,11 @@ def has_web_search_tool(request: AnthropicMessagesRequest) -> bool:
     """
     检查请求是否为纯 WebSearch 请求。
 
-    条件：tools 有且只有一个，且 name 为 web_search
+    条件：tools 有且只有一个，且为 web_search 工具
+
+    支持的格式：
+    1. {"type": "web_search_20250305", "name": "web_search"}
+    2. {"name": "web_search", ...}
 
     Args:
         request: Anthropic 消息请求
@@ -67,7 +71,14 @@ def has_web_search_tool(request: AnthropicMessagesRequest) -> bool:
     tool_name = tool_dict.get("name", "")
     tool_type = tool_dict.get("type", "")
 
-    return tool_name == "web_search" or tool_type.startswith("web_search")
+    # 支持多种格式
+    is_web_search = (
+        tool_name == "web_search" or
+        tool_type.startswith("web_search") or
+        "web_search" in tool_type
+    )
+
+    return is_web_search
 
 
 def extract_search_query(request: AnthropicMessagesRequest) -> Optional[str]:
