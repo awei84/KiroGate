@@ -2782,21 +2782,28 @@ def _extract_refresh_tokens(payload: object) -> tuple[list[TokenCredential], int
         client_id = None
         client_secret = None
 
-        # 直接字段
+        # 直接字段（支持驼峰和蛇形命名）
         if "refreshToken" in obj:
             refresh_token = obj.get("refreshToken")
-        # 嵌套在 credentials 中
+        elif "refresh_token" in obj:
+            refresh_token = obj.get("refresh_token")
+        # 嵌套在 credentials 或 credentials_kiro_rs 中
         elif isinstance(obj.get("credentials"), dict):
             creds = obj["credentials"]
-            refresh_token = creds.get("refreshToken")
-            client_id = creds.get("clientId")
-            client_secret = creds.get("clientSecret")
+            refresh_token = creds.get("refreshToken") or creds.get("refresh_token")
+            client_id = creds.get("clientId") or creds.get("client_id")
+            client_secret = creds.get("clientSecret") or creds.get("client_secret")
+        elif isinstance(obj.get("credentials_kiro_rs"), dict):
+            creds = obj["credentials_kiro_rs"]
+            refresh_token = creds.get("refreshToken") or creds.get("refresh_token")
+            client_id = creds.get("clientId") or creds.get("client_id")
+            client_secret = creds.get("clientSecret") or creds.get("client_secret")
 
-        # 获取 clientId 和 clientSecret（如果在顶层）
+        # 获取 clientId 和 clientSecret（如果在顶层，支持两种命名）
         if client_id is None:
-            client_id = obj.get("clientId")
+            client_id = obj.get("clientId") or obj.get("client_id")
         if client_secret is None:
-            client_secret = obj.get("clientSecret")
+            client_secret = obj.get("clientSecret") or obj.get("client_secret")
 
         if not refresh_token or not isinstance(refresh_token, str):
             record_missing(path, "缺少 refreshToken")

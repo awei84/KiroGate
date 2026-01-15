@@ -5538,17 +5538,32 @@ def render_user_page(user) -> str:
       if (authType === 'idc') {{
         const clientId = document.getElementById('donateClientId').value.trim();
         const clientSecret = document.getElementById('donateClientSecret').value.trim();
-        if (!clientId || !clientSecret) {{
+        // 检查 JSON 中是否包含 client_id/client_secret
+        let jsonHasClientInfo = false;
+        if (tokensText) {{
+          try {{
+            const parsed = JSON.parse(tokensText);
+            const items = Array.isArray(parsed) ? parsed : [parsed];
+            jsonHasClientInfo = items.some(item => {{
+              const hasTopLevel = (item.client_id || item.clientId) && (item.client_secret || item.clientSecret);
+              const creds = item.credentials || item.credentials_kiro_rs || {{}};
+              const hasNested = (creds.client_id || creds.clientId) && (creds.client_secret || creds.clientSecret);
+              return hasTopLevel || hasNested;
+            }});
+          }} catch (e) {{}}
+        }}
+        // 只有当 JSON 中没有 client 信息时才强制要求手动填写
+        if (!jsonHasClientInfo && (!clientId || !clientSecret)) {{
           return showConfirmModal({{
             title: '提示',
-            message: 'IDC 模式下必须填写 Client ID 和 Client Secret',
+            message: 'IDC 模式下必须填写 Client ID 和 Client Secret（或在 JSON 中包含这些字段）',
             icon: '⚠️',
             confirmText: '好的',
             danger: false
           }});
         }}
-        fd.append('client_id', clientId);
-        fd.append('client_secret', clientSecret);
+        if (clientId) fd.append('client_id', clientId);
+        if (clientSecret) fd.append('client_secret', clientSecret);
       }}
 
       // 提交
