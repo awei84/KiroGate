@@ -20,6 +20,45 @@
 
 ---
 
+## 📦 如何使用本 Fork 版本
+
+> ⚠️ **重要**: 本项目是上游项目的 Fork 增强版，**不提供预构建的 Docker 镜像**。
+> 
+> 如果你直接执行网上看到的 `docker run ... kirogate` 命令，可能会拉取到其他项目的镜像，而非本 Fork 版本！
+
+**使用本 Fork 版本的正确方式：**
+
+```bash
+# 1. 克隆本仓库
+git clone https://github.com/aliom-v/KiroGate.git
+cd KiroGate
+
+# 2. 选择以下任一方式部署：
+
+# 方式 A：使用 docker-compose（推荐）
+cp .env.example .env
+# 编辑 .env 填写配置
+docker-compose up -d
+
+# 方式 B：手动构建 Docker 镜像
+docker build -t kirogate .
+docker run -d -p 8000:8000 \
+  -e PROXY_API_KEY="your-password" \
+  -e ADMIN_PASSWORD="your-admin-password" \
+  -e ADMIN_SECRET_KEY="your-random-secret" \
+  -v kirogate_data:/app/data \
+  --name kirogate kirogate
+
+# 方式 C：直接运行 Python
+pip install -r requirements.txt
+cp .env.example .env
+python main.py
+```
+
+详细配置请参考下方的 [配置说明](#%EF%B8%8F-配置说明) 部分。
+
+---
+
 ## 🆕 本 Fork 的新增功能
 
 相比上游项目，本 Fork 新增/改进了以下功能：
