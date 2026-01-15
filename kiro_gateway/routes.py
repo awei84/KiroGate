@@ -64,6 +64,7 @@ from kiro_gateway.models import (
 )
 from kiro_gateway.auth import KiroAuthManager
 from kiro_gateway.auth_cache import auth_cache
+from kiro_gateway.tokenizer import count_message_tokens, count_tools_tokens, count_tokens
 from kiro_gateway.cache import ModelInfoCache
 from kiro_gateway.request_handler import RequestHandler
 from kiro_gateway.utils import get_kiro_headers
@@ -997,6 +998,62 @@ async def anthropic_messages(
         convert_to_openai=True,
         response_format="anthropic"
     )
+
+
+# ==================================================================================================
+# Count Tokens API Endpoint (/v1/messages/count_tokens)
+# ==================================================================================================
+
+@router.post("/v1/messages/count_tokens")
+async def count_tokens_endpoint(
+    request: Request,
+    request_data: AnthropicMessagesRequest,
+):
+    """
+    Count tokens in a messages request without making an API call.
+    
+    Compatible with Anthropic's count_tokens API.
+    Returns estimated token count for the given messages.
+    
+    Args:
+        request: FastAPI Request
+        request_data: Anthropic MessagesRequest format
+    
+    Returns:
+        JSONResponse with input_tokens count
+    """
+    logger.info(f"[{get_timestamp()}] 收到 /v1/messages/count_tokens 请求")
+    
+    # Count message tokens
+    messages_tokens = 0
+    if request_data.messages:
+        # Convert to list of dicts for tokenizer
+        messages_list = [msg.model_dump() if hasattr(msg, 'model_dump') else msg for msg in request_data.messages]
+        messages_tokens = count_message_tokens(messages_list)
+    
+    # Count system prompt tokens
+    system_tokens = 0
+    if request_data.system:
+        if isinstance(request_data.system, str):
+            system_tokens = count_tokens(request_data.system)
+        elif isinstance(request_data.system, list):
+            for item in request_data.system:
+                if hasattr(item, 'text'):
+                    system_tokens += count_tokens(item.text)
+                elif isinstance(item, dict) and 'text' in item:
+                    system_tokens += count_tokens(item['text'])
+    
+    # Count tools tokens
+    tools_tokens = 0
+    if request_data.tools:
+        tools_list = [tool.model_dump() if hasattr(tool, 'model_dump') else tool for tool in request_data.tools]
+        tools_tokens = count_tools_tokens(tools_list)
+    
+    total_tokens = messages_tokens + system_tokens + tools_tokens
+    
+    logger.info(f"[{get_timestamp()}] Token 统计: messages={messages_tokens}, system={system_tokens}, tools={tools_tokens}, total={total_tokens}")
+    
+    return JSONResponse(content={"input_tokens": total_tokens})
 
 
 # --- Rate limit error handler ---

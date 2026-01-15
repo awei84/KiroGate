@@ -51,6 +51,7 @@ docker run -d -p 8000:8000 \
 | **安全修复** | 修复 session 伪造、路径遍历等安全漏洞 |
 | **用户系统** | 支持 LinuxDo/GitHub OAuth2 登录、Token 捐献、API Key 生成 |
 | **Admin 管理后台** | 用户管理、Token 池管理、IP 黑名单等 |
+| **Token 统计 API** | `/v1/messages/count_tokens` 估算请求的 Token 数量 |
 
 ---
 
@@ -335,6 +336,7 @@ STATIC_ASSETS_PROXY_BASE="https://proxy.jhun.edu.kg"
 | `/v1/models` | GET | 获取可用模型列表 |
 | `/v1/chat/completions` | POST | OpenAI 兼容的聊天补全 |
 | `/v1/messages` | POST | Anthropic 兼容的消息 API |
+| `/v1/messages/count_tokens` | POST | 估算请求的 Token 数量 |
 
 ### 认证方式
 
