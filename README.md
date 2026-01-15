@@ -30,6 +30,7 @@
 | **历史消息图片压缩** | 历史消息中的图片自动替换为占位符，避免请求体过大 |
 | **Extended Thinking** | 完整支持 Claude 的扩展思考模式 |
 | **Token 管理增强** | Token 管理页面添加账户详情功能 |
+| **Kiro 账户信息查看** | 查看 Kiro 账户余额、使用量、订阅状态等信息 |
 | **Token 刷新防抖** | 防止并发请求导致的 Token 刷新竞争问题 |
 | **安全修复** | 修复 session 伪造、路径遍历等安全漏洞 |
 | **用户系统** | 支持 LinuxDo/GitHub OAuth2 登录、Token 捐献、API Key 生成 |
@@ -88,21 +89,41 @@ python main.py
 
 ### Docker 部署
 
-> **注意**: 本 Fork 不提供预构建的 Docker 镜像，请自行构建部署。
+> ⚠️ **重要提示**: 本 Fork 版本**不提供预构建的 Docker 镜像**，你需要自行克隆仓库并构建镜像。
+> 
+> 如果你直接执行 `docker run ... kirogate` 可能会拉取到其他项目的镜像，而非本 Fork 版本！
+
+#### 方式一：本地构建（推荐）
 
 ```bash
-# 本地构建运行
+# 1. 克隆本仓库
+git clone https://github.com/aliom-v/KiroGate.git
+cd KiroGate
+
+# 2. 构建镜像
 docker build -t kirogate .
+
+# 3. 运行容器
 docker run -d -p 8000:8000 \
   -e PROXY_API_KEY="your-password" \
   -e ADMIN_PASSWORD="your-admin-password" \
   -e ADMIN_SECRET_KEY="your-random-secret" \
   -v kirogate_data:/app/data \
   --name kirogate kirogate
+```
 
-# 或使用 docker-compose
+#### 方式二：使用 docker-compose（推荐）
+
+```bash
+# 1. 克隆本仓库
+git clone https://github.com/aliom-v/KiroGate.git
+cd KiroGate
+
+# 2. 配置环境变量
 cp .env.example .env
 # 编辑 .env 填写你的凭证
+
+# 3. 启动服务
 docker-compose up -d
 
 # 查看日志
