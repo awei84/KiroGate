@@ -2941,10 +2941,26 @@ async def _process_import_payload(
     user_id: int,
     visibility: str,
     anonymous: bool,
-    payload: object
+    payload: object,
+    override_auth_type: str | None = None,
+    override_client_id: str | None = None,
+    override_client_secret: str | None = None,
 ) -> tuple[dict, int]:
     credentials, missing_required, missing_samples = _extract_refresh_tokens(payload)
     credentials = _dedupe_credentials(credentials)
+
+    # 如果指定了 override 参数（IDC 模式），将其应用到所有凭证
+    if override_auth_type == "idc" and override_client_id and override_client_secret:
+        credentials = [
+            TokenCredential(
+                refresh_token=cred.refresh_token,
+                auth_type="idc",
+                client_id=override_client_id,
+                client_secret=override_client_secret,
+            )
+            for cred in credentials
+        ]
+
     if not credentials:
         message = "未找到可导入的 Refresh Token"
         if missing_required:
@@ -3120,6 +3136,9 @@ async def user_import_tokens(
     json_text: str | None = Form(None),
     visibility: str = Form("private"),
     anonymous: bool = Form(False),
+    auth_type: str = Form("social"),
+    client_id: str | None = Form(None),
+    client_secret: str | None = Form(None),
     _csrf: None = Depends(require_same_origin)
 ):
     """Import refresh tokens from a JSON file."""
@@ -3134,6 +3153,9 @@ async def user_import_tokens(
     if visibility not in ("public", "private"):
         return JSONResponse(status_code=400, content={"error": "可见性无效"})
 
+    if auth_type not in ("social", "idc"):
+        return JSONResponse(status_code=400, content={"error": "认证类型无效"})
+
     payload, error, status = await _read_import_payload(
         file=file,
         tokens_text=tokens_text,
@@ -3146,7 +3168,10 @@ async def user_import_tokens(
         user_id=user.id,
         visibility=visibility,
         anonymous=anonymous,
-        payload=payload
+        payload=payload,
+        override_auth_type=auth_type if auth_type == "idc" else None,
+        override_client_id=client_id.strip() if client_id else None,
+        override_client_secret=client_secret.strip() if client_secret else None,
     )
     if status != 200:
         return JSONResponse(status_code=status, content=result)

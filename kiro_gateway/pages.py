@@ -5538,8 +5538,17 @@ def render_user_page(user) -> str:
       if (authType === 'idc') {{
         const clientId = document.getElementById('donateClientId').value.trim();
         const clientSecret = document.getElementById('donateClientSecret').value.trim();
-        if (clientId) fd.append('client_id', clientId);
-        if (clientSecret) fd.append('client_secret', clientSecret);
+        if (!clientId || !clientSecret) {{
+          return showConfirmModal({{
+            title: '提示',
+            message: 'IDC 模式下必须填写 Client ID 和 Client Secret',
+            icon: '⚠️',
+            confirmText: '好的',
+            danger: false
+          }});
+        }}
+        fd.append('client_id', clientId);
+        fd.append('client_secret', clientSecret);
       }}
 
       // 提交
