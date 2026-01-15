@@ -4510,6 +4510,22 @@ def render_user_page(user) -> str:
     <div class="card w-full max-w-md mx-4">
       <h3 class="text-lg font-bold mb-4">🎁 批量添加 Refresh Token</h3>
 
+      <!-- 认证类型选择 -->
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-2 block">🔐 认证类型</label>
+        <div class="flex gap-2">
+          <button onclick="setAuthType('social')" id="authType-social" class="auth-type-btn flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all" style="background: var(--primary); color: white; border: 1px solid var(--primary);">
+            Social (默认)
+          </button>
+          <button onclick="setAuthType('idc')" id="authType-idc" class="auth-type-btn flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all" style="background: var(--bg-input); border: 1px solid var(--border);">
+            IDC (Builder ID)
+          </button>
+        </div>
+        <p class="text-xs mt-1" style="color: var(--text-muted);">💡 Social: Kiro 桌面端登录 | IDC: AWS Builder ID 登录</p>
+      </div>
+
+      <input type="hidden" id="donateAuthType" value="social">
+
       <!-- Token 输入区域 -->
       <div class="mb-3">
         <label class="text-sm font-medium mb-2 block">📝 粘贴 Token</label>
@@ -4517,11 +4533,23 @@ def render_user_page(user) -> str:
         <p class="text-xs mt-1" style="color: var(--text-muted);">💡 支持多行或逗号分隔，自动去除空行和重复项</p>
       </div>
 
+      <!-- IDC 额外字段（仅 IDC 模式显示） -->
+      <div id="idcFields" class="mb-3 p-3 rounded-lg" style="background: var(--bg-input); border: 1px solid var(--border); display: none;">
+        <p class="text-sm font-medium mb-2">🆔 IDC 认证信息</p>
+        <div class="mb-2">
+          <input type="text" id="donateClientId" class="w-full px-3 py-2 rounded-lg text-sm" style="background: var(--bg-card); border: 1px solid var(--border);" placeholder="Client ID">
+        </div>
+        <div>
+          <input type="password" id="donateClientSecret" class="w-full px-3 py-2 rounded-lg text-sm" style="background: var(--bg-card); border: 1px solid var(--border);" placeholder="Client Secret">
+        </div>
+        <p class="text-xs mt-2" style="color: var(--text-muted);">⚠️ IDC 模式下所有 Token 共用同一组 Client ID/Secret</p>
+      </div>
+
       <!-- 文件上传 -->
       <div class="mb-4">
         <label class="text-sm font-medium mb-2 block">📁 或上传 JSON 文件</label>
         <input id="donateFile" type="file" accept=".json" class="w-full text-sm p-2 rounded-lg" style="background: var(--bg-input); border: 1px solid var(--border);">
-        <p class="text-xs mt-1" style="color: var(--text-muted);">支持 Kiro Account Manager 导出的 JSON 文件</p>
+        <p class="text-xs mt-1" style="color: var(--text-muted);">支持 Kiro Account Manager 导出的 JSON 文件（自动识别 IDC 凭证）</p>
       </div>
 
       <!-- 可见性选择 -->
@@ -5372,14 +5400,43 @@ def render_user_page(user) -> str:
     function showDonateModal() {{
       document.getElementById('donateModal').style.display = 'flex';
       if (SELF_USE_MODE) setDonateMode('private');
+      setAuthType('social'); // 重置为默认认证类型
     }}
 
     function hideDonateModal() {{
       document.getElementById('donateModal').style.display = 'none';
       setDonateMode('private');
+      setAuthType('social');
       document.getElementById('donateTokens').value = '';
       document.getElementById('donateFile').value = '';
       document.getElementById('donateAnonymous').checked = false;
+      document.getElementById('donateClientId').value = '';
+      document.getElementById('donateClientSecret').value = '';
+    }}
+
+    function setAuthType(type) {{
+      const socialBtn = document.getElementById('authType-social');
+      const idcBtn = document.getElementById('authType-idc');
+      const idcFields = document.getElementById('idcFields');
+
+      if (type === 'idc') {{
+        socialBtn.style.background = 'var(--bg-input)';
+        socialBtn.style.color = 'var(--text)';
+        socialBtn.style.border = '1px solid var(--border)';
+        idcBtn.style.background = 'var(--primary)';
+        idcBtn.style.color = 'white';
+        idcBtn.style.border = '1px solid var(--primary)';
+        idcFields.style.display = 'block';
+      }} else {{
+        socialBtn.style.background = 'var(--primary)';
+        socialBtn.style.color = 'white';
+        socialBtn.style.border = '1px solid var(--primary)';
+        idcBtn.style.background = 'var(--bg-input)';
+        idcBtn.style.color = 'var(--text)';
+        idcBtn.style.border = '1px solid var(--border)';
+        idcFields.style.display = 'none';
+      }}
+      document.getElementById('donateAuthType').value = type;
     }}
 
     function setDonateMode(mode) {{
@@ -5474,6 +5531,16 @@ def render_user_page(user) -> str:
       }}
       fd.append('visibility', visibility);
       if (visibility === 'public' && anonymous) fd.append('anonymous', 'true');
+
+      // 添加 IDC 认证参数
+      const authType = document.getElementById('donateAuthType').value;
+      fd.append('auth_type', authType);
+      if (authType === 'idc') {{
+        const clientId = document.getElementById('donateClientId').value.trim();
+        const clientSecret = document.getElementById('donateClientSecret').value.trim();
+        if (clientId) fd.append('client_id', clientId);
+        if (clientSecret) fd.append('client_secret', clientSecret);
+      }}
 
       // 提交
       try {{
