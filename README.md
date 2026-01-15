@@ -42,8 +42,9 @@ docker run -d -p 8000:8000 \
 
 | 功能 | 说明 |
 |------|------|
-| **WebSearch 工具支持** | 🆕 支持 Anthropic 官方的 web_search 工具，通过 Kiro MCP API 实现 |
-| **HTTP/SOCKS5 代理** | 🆕 支持配置代理服务器访问 Kiro API |
+| **IDC (Builder ID) 认证** | 🆕 支持 AWS IAM Identity Center 认证方式 (Builder ID) |
+| **WebSearch 工具支持** | 支持 Anthropic 官方的 web_search 工具，通过 Kiro MCP API 实现 |
+| **HTTP/SOCKS5 代理** | 支持配置代理服务器访问 Kiro API |
 | **图片支持** | 支持 OpenAI (`image_url`) 和 Anthropic (`image`) 格式的图片输入 |
 | **历史消息图片压缩** | 历史消息中的图片自动替换为占位符，避免请求体过大 |
 | **Extended Thinking** | 完整支持 Claude 的扩展思考模式 |
