@@ -62,6 +62,7 @@ class DonatedToken:
     id: int
     user_id: int
     token_hash: str
+    auth_type: str  # 'social' or 'idc'
     visibility: str  # 'public' or 'private'
     status: str  # 'active', 'invalid', 'expired'
     success_count: int
@@ -263,6 +264,13 @@ class UserDatabase:
                 conn.execute("ALTER TABLE tokens ADD COLUMN account_limit REAL")
             if "account_checked_at" not in token_columns:
                 conn.execute("ALTER TABLE tokens ADD COLUMN account_checked_at INTEGER")
+            # 添加 IDC 认证相关字段
+            if "auth_type" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN auth_type TEXT DEFAULT 'social'")
+            if "client_id_encrypted" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN client_id_encrypted TEXT")
+            if "client_secret_encrypted" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN client_secret_encrypted TEXT")
             conn.commit()
         logger.info(f"User database initialized: {self._db_path}")
 
@@ -765,16 +773,35 @@ class UserDatabase:
         user_id: int,
         refresh_token: str,
         visibility: str = "private",
-        anonymous: bool = False
+        anonymous: bool = False,
+        auth_type: str = "social",
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
         Donate a refresh token.
 
+        Args:
+            user_id: 用户 ID
+            refresh_token: 刷新令牌
+            visibility: 可见性 (public/private)
+            anonymous: 是否匿名
+            auth_type: 认证类型 (social/idc)
+            client_id: OAuth Client ID (IDC 模式必填)
+            client_secret: OAuth Client Secret (IDC 模式必填)
+
         Returns:
             (success, message) tuple
         """
+        # IDC 模式必须提供 client_id 和 client_secret
+        if auth_type == "idc":
+            if not client_id or not client_secret:
+                return False, "IDC 模式需要提供 Client ID 和 Client Secret"
+
         token_hash = self._hash_token(refresh_token)
         encrypted = self._encrypt_token(refresh_token)
+        client_id_enc = self._encrypt_token(client_id) if client_id else None
+        client_secret_enc = self._encrypt_token(client_secret) if client_secret else None
         now = int(time.time() * 1000)
         is_anonymous = 1 if visibility == "public" and anonymous else 0
 
@@ -789,9 +816,13 @@ class UserDatabase:
 
                 conn.execute(
                     """INSERT INTO tokens
-                       (user_id, refresh_token_encrypted, token_hash, visibility, is_anonymous, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (user_id, encrypted, token_hash, visibility, is_anonymous, now)
+                       (user_id, refresh_token_encrypted, token_hash, auth_type,
+                        client_id_encrypted, client_secret_encrypted,
+                        visibility, is_anonymous, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (user_id, encrypted, token_hash, auth_type,
+                     client_id_enc, client_secret_enc,
+                     visibility, is_anonymous, now)
                 )
                 return True, "Token 添加成功"
 
@@ -1008,6 +1039,7 @@ class UserDatabase:
             id=row["id"],
             user_id=row["user_id"],
             token_hash=row["token_hash"],
+            auth_type=row["auth_type"] if "auth_type" in row.keys() else "social",
             visibility=row["visibility"],
             status=row["status"],
             success_count=row["success_count"],
@@ -1045,6 +1077,47 @@ class UserDatabase:
                     (email, status, usage, limit, int(time.time()), token_id)
                 )
                 return conn.total_changes > 0
+
+    def get_token_credentials(self, token_id: int) -> Optional[dict]:
+        """
+        获取 token 的完整凭证信息（包括解密的 refresh_token/client_id/client_secret）。
+
+        用于创建 KiroAuthManager 实例。
+
+        Args:
+            token_id: Token ID
+
+        Returns:
+            dict with keys: refresh_token, auth_type, client_id, client_secret
+            Returns None if token not found
+        """
+        with self._lock:
+            with self._get_conn() as conn:
+                row = conn.execute(
+                    """SELECT refresh_token_encrypted, auth_type,
+                              client_id_encrypted, client_secret_encrypted
+                       FROM tokens WHERE id = ?""",
+                    (token_id,)
+                ).fetchone()
+
+                if not row:
+                    return None
+
+                refresh_token = self._decrypt_token(row["refresh_token_encrypted"])
+                auth_type = row["auth_type"] or "social"
+                client_id = None
+                client_secret = None
+
+                if auth_type == "idc" and row["client_id_encrypted"] and row["client_secret_encrypted"]:
+                    client_id = self._decrypt_token(row["client_id_encrypted"])
+                    client_secret = self._decrypt_token(row["client_secret_encrypted"])
+
+                return {
+                    "refresh_token": refresh_token,
+                    "auth_type": auth_type,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                }
 
     # ==================== API Key Methods ====================
 
