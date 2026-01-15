@@ -3298,14 +3298,18 @@ async def user_get_token_account_info(
     if not token or token.user_id != user.id:
         return JSONResponse(status_code=404, content={"error": "Token 不存在"})
 
-    # 获取解密后的 refresh_token
-    refresh_token = user_db.get_decrypted_token(token_id)
-    if not refresh_token:
+    # 获取解密后的完整凭证（包括 IDC 的 client_id/client_secret）
+    credentials = user_db.get_token_credentials(token_id)
+    if not credentials or not credentials.get("refresh_token"):
         return JSONResponse(status_code=400, content={"error": "无法获取 Token"})
 
     # 使用 refresh_token 获取 access_token
     from kiro_gateway.auth import KiroAuthManager
-    auth_manager = KiroAuthManager(refresh_token)
+    auth_manager = KiroAuthManager(
+        refresh_token=credentials["refresh_token"],
+        client_id=credentials.get("client_id"),
+        client_secret=credentials.get("client_secret"),
+    )
     try:
         access_token = await auth_manager.get_access_token()
         if not access_token:
