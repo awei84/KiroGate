@@ -30,7 +30,7 @@
 
 ```bash
 # 1. 克隆本仓库
-git clone https://github.com/aliom-v/KiroGate.git
+git clone https://github.com/awei84/KiroGate.git
 cd KiroGate
 
 # 2. 选择以下任一方式部署：
@@ -110,7 +110,7 @@ python main.py
 
 ```bash
 # 克隆仓库
-git clone https://github.com/aliom-v/KiroGate.git
+git clone https://github.com/awei84/KiroGate.git
 cd KiroGate
 
 # 安装依赖
@@ -136,7 +136,7 @@ python main.py
 
 ```bash
 # 1. 克隆本仓库
-git clone https://github.com/aliom-v/KiroGate.git
+git clone https://github.com/awei84/KiroGate.git
 cd KiroGate
 
 # 2. 构建镜像
@@ -155,7 +155,7 @@ docker run -d -p 8000:8000 \
 
 ```bash
 # 1. 克隆本仓库
-git clone https://github.com/aliom-v/KiroGate.git
+git clone https://github.com/awei84/KiroGate.git
 cd KiroGate
 
 # 2. 配置环境变量
