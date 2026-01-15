@@ -20,13 +20,19 @@
 
 ---
 
-## ⚠️ 重要提示
+## 📦 Docker 快速启动
 
-> 本项目是 [kiro-openai-gateway](https://github.com/Jwadow/kiro-openai-gateway) 的 **Fork 增强版**，**不提供预构建的 Docker 镜像**。
-> 
-> 如果你直接执行 `docker run ... kirogate` 命令，可能会拉取到其他项目的镜像，而非本 Fork 版本！
-> 
-> **正确做法**：先克隆本仓库，再本地构建。详见 [快速开始](#-快速开始)。
+```bash
+docker run -d -p 8000:8000 \
+  -e PROXY_API_KEY="your-password" \
+  -e ADMIN_PASSWORD="your-admin-password" \
+  -e ADMIN_SECRET_KEY="your-random-secret" \
+  -v kirogate_data:/app/data \
+  --name kirogate \
+  ghcr.io/awei84/kirogate:main
+```
+
+> 💡 本项目是 [kiro-openai-gateway](https://github.com/Jwadow/kiro-openai-gateway) 的 **Fork 增强版**，新增了图片支持、用户系统、Admin 后台等功能。
 
 ---
 
@@ -99,28 +105,33 @@ python main.py
 
 ### Docker 部署
 
-> ⚠️ **注意**: 本 Fork 版本**不提供预构建的 Docker 镜像**，请先克隆仓库再构建。
+#### 方式一：直接拉取镜像（推荐）
 
 ```bash
-# 如果还没克隆仓库，先执行：
-git clone https://github.com/awei84/KiroGate.git
-cd KiroGate
+docker run -d -p 8000:8000 \
+  -e PROXY_API_KEY="your-password" \
+  -e ADMIN_PASSWORD="your-admin-password" \
+  -e ADMIN_SECRET_KEY="your-random-secret" \
+  -v kirogate_data:/app/data \
+  --name kirogate \
+  ghcr.io/awei84/kirogate:main
 ```
 
-#### 方式一：docker-compose（推荐）
+#### 方式二：使用 docker-compose
 
 ```bash
+git clone https://github.com/awei84/KiroGate.git
+cd KiroGate
 cp .env.example .env
 # 编辑 .env 填写你的凭证
 docker-compose up -d
-
-# 查看日志
-docker logs -f kirogate
 ```
 
-#### 方式二：手动构建
+#### 方式三：本地构建
 
 ```bash
+git clone https://github.com/awei84/KiroGate.git
+cd KiroGate
 docker build -t kirogate .
 docker run -d -p 8000:8000 \
   -e PROXY_API_KEY="your-password" \

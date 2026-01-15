@@ -14,7 +14,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     # 仅在主仓库运行，fork 仓库跳过
-    if: github.repository == 'dext7r/KiroGate'
+    if: github.repository == 'awei84/KiroGate'
     permissions:
       contents: read
       packages: write
