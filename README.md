@@ -42,6 +42,7 @@ docker run -d -p 8000:8000 \
 
 | 功能 | 说明 |
 |------|------|
+| **智能对话状态管理** | 🆕 精准识别中断/新对话，工具调用配对验证，告别"僵尸任务" |
 | **IDC (Builder ID) 认证** | 🆕 支持 AWS IAM Identity Center 认证方式 (Builder ID) |
 | **WebSearch 工具支持** | 支持 Anthropic 官方的 web_search 工具，通过 Kiro MCP API 实现 |
 | **HTTP/SOCKS5 代理** | 支持配置代理服务器访问 Kiro API |
@@ -52,7 +53,6 @@ docker run -d -p 8000:8000 \
 | **Kiro 账户信息查看** | 查看 Kiro 账户余额、使用量、订阅状态等信息 |
 | **Token 刷新防抖** | 防止并发请求导致的 Token 刷新竞争问题 |
 | **安全修复** | 修复 session 伪造、路径遍历等安全漏洞 |
-| **Issue #17 修复** | 修复中断后旧任务延续问题，改进工具调用配对验证 |
 | **用户系统** | 支持 LinuxDo/GitHub OAuth2 登录、Token 捐献、API Key 生成 |
 | **Admin 管理后台** | 用户管理、Token 池管理、IP 黑名单等 |
 | **Token 统计 API** | `/v1/messages/count_tokens` 估算请求的 Token 数量 |
