@@ -445,24 +445,30 @@ def build_kiro_history(messages: List[ChatMessage], model_id: str) -> List[Dict[
 def _extract_tool_results(content: Any) -> List[Dict[str, Any]]:
     """
     Извлекает tool results из контента сообщения.
-    
+
     Args:
         content: Контент сообщения (может быть списком)
-    
+
     Returns:
         Список tool results в формате Kiro
     """
     tool_results = []
-    
+
     if isinstance(content, list):
         for item in content:
             if isinstance(item, dict) and item.get("type") == "tool_result":
+                # Issue #17 修复：正确处理 is_error 标志
+                # 当工具执行失败时，应该返回 "error" 而不是 "success"
+                # 这样模型才能正确理解工具执行结果，不会继续基于错误结果推理
+                is_error = item.get("is_error", False)
+                status = "error" if is_error else "success"
+
                 tool_results.append({
                     "content": [{"text": extract_text_content(item.get("content", ""))}],
-                    "status": "success",
+                    "status": status,
                     "toolUseId": item.get("tool_use_id", "")
                 })
-    
+
     return tool_results
 
 
@@ -554,15 +560,15 @@ def process_tools_with_long_descriptions(
 def _extract_tool_uses(msg: ChatMessage) -> List[Dict[str, Any]]:
     """
     Извлекает tool uses из сообщения assistant.
-    
+
     Args:
         msg: Сообщение assistant
-    
+
     Returns:
         Список tool uses в формате Kiro
     """
     tool_uses = []
-    
+
     # Из поля tool_calls
     if msg.tool_calls:
         for tc in msg.tool_calls:
@@ -572,7 +578,7 @@ def _extract_tool_uses(msg: ChatMessage) -> List[Dict[str, Any]]:
                     "input": json.loads(tc.get("function", {}).get("arguments", "{}")),
                     "toolUseId": tc.get("id", "")
                 })
-    
+
     # Из content (если там есть tool_use)
     if isinstance(msg.content, list):
         for item in msg.content:
@@ -582,8 +588,87 @@ def _extract_tool_uses(msg: ChatMessage) -> List[Dict[str, Any]]:
                     "input": item.get("input", {}),
                     "toolUseId": item.get("id", "")
                 })
-    
+
     return tool_uses
+
+
+def validate_tool_pairing(
+    history: List[Dict[str, Any]],
+    tool_results: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """
+    验证并过滤 tool_use/tool_result 配对。
+
+    参考 kiro.rs 实现，收集所有 tool_use_id，验证 tool_result 是否匹配。
+    静默跳过孤立的 tool_use 和 tool_result，输出警告日志。
+
+    这个函数可以防止：
+    - 无限循环：重复的 tool_result 不会被发送
+    - 错误配对：孤立的 tool_result 被过滤
+
+    Args:
+        history: 历史消息列表（Kiro 格式）
+        tool_results: 当前消息中的 tool_result 列表
+
+    Returns:
+        经过验证和过滤后的 tool_result 列表
+    """
+    # 1. 收集所有历史中的 tool_use_id
+    all_tool_use_ids: set = set()
+    # 2. 收集历史中已经有 tool_result 的 tool_use_id
+    history_tool_result_ids: set = set()
+
+    for msg in history:
+        # 从 assistant 消息中收集 tool_use_id
+        if "assistantResponseMessage" in msg:
+            assistant_msg = msg["assistantResponseMessage"]
+            tool_uses = assistant_msg.get("toolUses", [])
+            for tool_use in tool_uses:
+                tool_use_id = tool_use.get("toolUseId", "")
+                if tool_use_id:
+                    all_tool_use_ids.add(tool_use_id)
+
+        # 从 user 消息中收集已配对的 tool_result_id
+        if "userInputMessage" in msg:
+            user_msg = msg["userInputMessage"]
+            context = user_msg.get("userInputMessageContext", {})
+            existing_results = context.get("toolResults", [])
+            for result in existing_results:
+                result_id = result.get("toolUseId", "")
+                if result_id:
+                    history_tool_result_ids.add(result_id)
+
+    # 3. 计算真正未配对的 tool_use_ids（排除历史中已配对的）
+    unpaired_tool_use_ids = all_tool_use_ids - history_tool_result_ids
+
+    # 4. 过滤并验证当前消息的 tool_results
+    filtered_results = []
+
+    for result in tool_results:
+        tool_use_id = result.get("toolUseId", "")
+
+        if tool_use_id in unpaired_tool_use_ids:
+            # 配对成功
+            filtered_results.append(result)
+            unpaired_tool_use_ids.discard(tool_use_id)
+        elif tool_use_id in all_tool_use_ids:
+            # tool_use 存在但已经在历史中配对过了，这是重复的 tool_result
+            logger.warning(
+                f"跳过重复的 tool_result：该 tool_use 已在历史中配对，tool_use_id={tool_use_id}"
+            )
+        else:
+            # 孤立 tool_result - 找不到对应的 tool_use
+            logger.warning(
+                f"跳过孤立的 tool_result：找不到对应的 tool_use，tool_use_id={tool_use_id}"
+            )
+
+    # 5. 检测真正孤立的 tool_use（有 tool_use 但在历史和当前消息中都没有 tool_result）
+    for orphaned_id in unpaired_tool_use_ids:
+        logger.warning(
+            f"检测到孤立的 tool_use：找不到对应的 tool_result，tool_use_id={orphaned_id}"
+        )
+
+    return filtered_results
 
 
 def _extract_system_and_tool_docs(
@@ -693,16 +778,30 @@ def build_kiro_payload(
     # Если текущее сообщение - assistant, нужно добавить его в историю
     # и создать user сообщение "Continue"
     if current_message.role == "assistant":
-        history.append({
+        assistant_history_entry = {
             "assistantResponseMessage": {
                 "content": current_content
             }
-        })
+        }
+        # 确保 assistant 消息中的 tool_uses 也被保留到历史中
+        # 否则 validate_tool_pairing 会找不到对应的 tool_use_id
+        tool_uses = _extract_tool_uses(current_message)
+        if tool_uses:
+            assistant_history_entry["assistantResponseMessage"]["toolUses"] = tool_uses
+        history.append(assistant_history_entry)
         current_content = "Continue"
-    
+
+    # 检查当前消息是否包含 tool_result
+    # Issue #17 修复：当有 tool_result 时，不应该强制注入 "Continue"
+    # 因为这会导致模型继续旧任务，而不是响应用户的新输入
+    current_tool_results = _extract_tool_results(current_message.content)
+    has_tool_results = len(current_tool_results) > 0
+
     # Если контент пустой
-    if not current_content:
+    # 只有在没有 tool_result 的情况下才注入 "Continue"
+    if not current_content and not has_tool_results:
         current_content = "Continue"
+        logger.debug("Injected 'Continue' as content is empty and no tool_results present")
     
     # Строим userInputMessage
     user_input_message = {
@@ -720,7 +819,8 @@ def build_kiro_payload(
 
     # Добавляем tools и tool_results если есть
     # Используем обработанные tools (с короткими descriptions)
-    user_input_context = _build_user_input_context(request_data, current_message, processed_tools)
+    # 传递 history 参数以启用 tool_use/tool_result 配对验证
+    user_input_context = _build_user_input_context(request_data, current_message, processed_tools, history)
     if user_input_context:
         user_input_message["userInputMessageContext"] = user_input_context
     
@@ -751,27 +851,30 @@ def build_kiro_payload(
 def _build_user_input_context(
     request_data: ChatCompletionRequest,
     current_message: ChatMessage,
-    processed_tools: Optional[List[Tool]] = None
+    processed_tools: Optional[List[Tool]] = None,
+    history: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """
     Строит userInputMessageContext для текущего сообщения.
-    
+
     Включает tools definitions и tool_results.
-    
+    使用 validate_tool_pairing() 验证 tool_results 配对，防止无限循环。
+
     Args:
         request_data: Запрос с tools
         current_message: Текущее сообщение
         processed_tools: Обработанные tools с короткими descriptions (опционально).
                         Если None, используются tools из request_data.
-    
+        history: 历史消息列表（Kiro 格式），用于验证 tool_use/tool_result 配对
+
     Returns:
         Словарь с контекстом или пустой словарь
     """
     context = {}
-    
+
     # Используем обработанные tools если переданы, иначе оригинальные
     tools_to_use = processed_tools if processed_tools is not None else request_data.tools
-    
+
     # Добавляем tools если есть
     if tools_to_use:
         tools_list = []
@@ -786,11 +889,20 @@ def _build_user_input_context(
                 })
         if tools_list:
             context["tools"] = tools_list
-    
+
     # Обработка tool_results в текущем сообщении
     tool_results = _extract_tool_results(current_message.content)
     if tool_results:
-        context["toolResults"] = tool_results
+        # 使用 validate_tool_pairing() 验证配对，过滤重复和孤立的 tool_result
+        # 只有当 history 非空时才进行验证（空列表时跳过验证，因为没有 tool_use 可供配对）
+        if history:
+            validated_results = validate_tool_pairing(history, tool_results)
+            if validated_results:
+                context["toolResults"] = validated_results
+            # 如果 validated_results 为空，说明所有 tool_results 都被过滤了，不添加到 context
+        else:
+            # 没有历史时直接使用（首次请求等场景）
+            context["toolResults"] = tool_results
 
     return context
 
