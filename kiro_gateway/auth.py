@@ -422,6 +422,16 @@ class KiroAuthManager:
                     return response.json()
             except httpx.HTTPStatusError as e:
                 last_error = e
+                # 记录详细错误信息，帮助诊断 401/403 等问题（可能是 token 过期或账号被封）
+                if e.response.status_code in (401, 403):
+                    try:
+                        error_detail = e.response.text
+                    except Exception:
+                        error_detail = "(无法读取响应体)"
+                    logger.error(
+                        f"Token 刷新认证失败: HTTP {e.response.status_code}, "
+                        f"响应内容: {error_detail}"
+                    )
                 if e.response.status_code in (429, 500, 502, 503, 504):
                     delay = base_delay * (2 ** attempt)
                     logger.warning(
