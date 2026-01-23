@@ -510,16 +510,25 @@ class KiroAuthManager:
 
             return self._access_token
 
-    async def force_refresh(self) -> str:
+    async def force_refresh(self, old_token: Optional[str] = None, force: bool = False) -> str:
         """
         Force token refresh.
 
         Used when receiving 403 error from API.
 
+        Args:
+            old_token: The token that was used when the error occurred.
+                       If provided and different from current token, skip refresh.
+            force: If True, skip debounce check (for admin manual refresh).
+
         Returns:
             New access token
         """
         async with self._lock:
+            # If old_token is provided and current token is different, skip refresh
+            # This means another request already refreshed the token
+            if old_token and self._access_token and old_token != self._access_token:
+                return self._access_token
             await self._refresh_token_request()
             return self._access_token
 
