@@ -348,7 +348,7 @@ class AnthropicMessagesRequest(BaseModel):
     Attributes:
         model: 模型 ID
         messages: 消息列表
-        max_tokens: 最大 token 数（必填）
+        max_tokens: 最大 token 数（可选，默认 16384）
         system: 系统提示词
         tools: 工具列表
         tool_choice: 工具选择策略
@@ -362,7 +362,7 @@ class AnthropicMessagesRequest(BaseModel):
     """
     model: str
     messages: Annotated[List[AnthropicMessage], Field(min_length=1)]
-    max_tokens: int  # Required in Anthropic API
+    max_tokens: int = 16384  # Default to 16384 if not provided
     system: Optional[Union[str, List[Dict[str, Any]]]] = None
     tools: Optional[List[AnthropicTool]] = None
     tool_choice: Optional[Dict[str, Any]] = None
