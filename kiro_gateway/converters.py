@@ -146,6 +146,44 @@ def inject_thinking_hint(system_prompt: str, thinking_config: Optional[Union[Dic
     return f"{thinking_hint}\n\n{system_prompt}"
 
 
+def inject_output_limit_warning(system_prompt: str) -> str:
+    """
+    注入输出限制警告到 system prompt 中。
+
+    这是为了解决 Kiro/AWS 上游输出被截断导致的 Write Failed / 会话卡死问题。
+    通过提示词告知模型输出限制，避免生成过长的单次输出。
+
+    Args:
+        system_prompt: 原始 system prompt
+
+    Returns:
+        注入后的 system prompt
+    """
+    from kiro_gateway.config import settings
+
+    if not settings.inject_output_limit_warning:
+        return system_prompt
+
+    # 检查是否已经包含输出限制警告标签
+    if "<OUTPUT_LIMIT_WARNING>" in system_prompt:
+        return system_prompt
+
+    limit = settings.output_token_limit
+
+    warning = f"""<OUTPUT_LIMIT_WARNING>
+CRITICAL: Your single response output must not exceed {limit} tokens.
+Exceeding this limit will cause output truncation and tool call failures.
+When writing large files or long content, you MUST split them into multiple smaller operations.
+Each file write should be under 300 lines. Use append mode for larger files.
+</OUTPUT_LIMIT_WARNING>"""
+
+    if not system_prompt:
+        return warning
+
+    # 将警告添加到 system prompt 末尾
+    return f"{system_prompt}\n\n{warning}"
+
+
 def extract_text_content(content: Any) -> str:
     """
     Извлекает текстовый контент из различных форматов.
@@ -745,6 +783,9 @@ def build_kiro_payload(
 
     # 注入 thinking 标签到 system prompt（如果启用）
     system_prompt = inject_thinking_hint(system_prompt, thinking_config)
+
+    # 注入输出限制警告（解决 Write Failed / 会话卡死问题）
+    system_prompt = inject_output_limit_warning(system_prompt)
 
     # Объединяем соседние сообщения с одинаковой ролью
     merged_messages = merge_adjacent_messages(non_system_messages)

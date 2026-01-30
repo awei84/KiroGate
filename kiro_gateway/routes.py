@@ -25,6 +25,7 @@ Contains all API endpoints:
 - /v1/models: Model list
 - /v1/chat/completions: OpenAI compatible chat completions
 - /v1/messages: Anthropic compatible messages API
+- /cc/v1/messages: Claude Code 兼容端点（缓冲模式，返回准确的 input_tokens）
 """
 
 import asyncio
@@ -1010,6 +1011,108 @@ async def anthropic_messages(
         convert_to_openai=True,
         response_format="anthropic"
     )
+
+
+# ==================================================================================================
+# Claude Code 兼容端点 (/cc/v1/messages) - 缓冲模式
+# ==================================================================================================
+
+@router.post("/cc/v1/messages")
+@rate_limit_decorator()
+async def cc_anthropic_messages(
+    request: Request,
+    request_data: AnthropicMessagesRequest,
+    auth_manager: KiroAuthManager = Depends(verify_anthropic_api_key)
+):
+    """
+    Claude Code 兼容的 Messages API 端点（缓冲模式）。
+
+    专为新版 Claude Code (2.1.9+) 设计，解决自动上下文压缩功能依赖准确 input_tokens 的问题。
+
+    与 /v1/messages 的区别：
+    - 始终使用流式响应
+    - 等待上游流完成后，用从 contextUsageEvent 计算的准确 input_tokens 更正 message_start
+    - 然后一次性返回所有事件
+    - 等待期间会每 25 秒发送 ping 事件保活
+
+    Args:
+        request: FastAPI Request
+        request_data: Anthropic MessagesRequest 格式
+        auth_manager: KiroAuthManager 实例
+
+    Returns:
+        StreamingResponse（缓冲模式）
+
+    Raises:
+        HTTPException: 验证或 API 错误
+    """
+    logger.info(f"[{get_timestamp()}] 收到 /cc/v1/messages 请求 (模型={request_data.model}, 缓冲模式)")
+
+    # 存储 auth_manager 和 model 到 request state
+    request.state.auth_manager = auth_manager
+    request.state.model = request_data.model
+
+    # 检查是否为 WebSearch 请求
+    try:
+        from kiro_gateway.websearch import has_web_search_tool, handle_websearch_request
+        if has_web_search_tool(request_data):
+            logger.info(f"[{get_timestamp()}] [CC] 检测到 WebSearch 工具，路由到 WebSearch 处理")
+            return await handle_websearch_request(request, request_data, auth_manager)
+    except ImportError:
+        pass  # websearch 模块不可用，继续正常处理
+
+    return await RequestHandler.process_cc_request(
+        request,
+        request_data,
+        "/cc/v1/messages"
+    )
+
+
+@router.post("/cc/v1/messages/count_tokens")
+async def cc_count_tokens_endpoint(
+    request: Request,
+    request_data: AnthropicMessagesRequest,
+):
+    """
+    Claude Code 兼容的 Count Tokens 端点（与 /v1 相同）。
+
+    Args:
+        request: FastAPI Request
+        request_data: Anthropic MessagesRequest 格式
+
+    Returns:
+        JSONResponse 包含 input_tokens 计数
+    """
+    # 直接复用 /v1/messages/count_tokens 的逻辑
+    logger.info(f"[{get_timestamp()}] 收到 /cc/v1/messages/count_tokens 请求")
+
+    # Count message tokens
+    messages_tokens = 0
+    if request_data.messages:
+        messages_list = [msg.model_dump() if hasattr(msg, 'model_dump') else msg for msg in request_data.messages]
+        messages_tokens = count_message_tokens(messages_list)
+
+    # Count system prompt tokens
+    system_tokens = 0
+    if request_data.system:
+        if isinstance(request_data.system, str):
+            system_tokens = count_tokens(request_data.system)
+        elif isinstance(request_data.system, list):
+            for item in request_data.system:
+                if hasattr(item, 'text'):
+                    system_tokens += count_tokens(item.text)
+                elif isinstance(item, dict) and 'text' in item:
+                    system_tokens += count_tokens(item['text'])
+
+    # Count tools tokens
+    tools_tokens = 0
+    if request_data.tools:
+        tools_list = [tool.model_dump() if hasattr(tool, 'model_dump') else tool for tool in request_data.tools]
+        tools_tokens = count_tools_tokens(tools_list)
+
+    total_tokens = messages_tokens + system_tokens + tools_tokens
+
+    return JSONResponse(content={"input_tokens": total_tokens})
 
 
 # ==================================================================================================

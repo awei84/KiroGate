@@ -46,6 +46,7 @@ from kiro_gateway.streaming import (
     collect_stream_response,
     stream_kiro_to_anthropic,
     collect_anthropic_response,
+    buffered_stream_kiro_to_anthropic,
 )
 from kiro_gateway.utils import generate_conversation_id, get_kiro_headers
 from kiro_gateway.config import settings, AUTO_CHUNKING_ENABLED, AUTO_CHUNK_THRESHOLD
@@ -595,6 +596,163 @@ class RequestHandler:
             )
             error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
             logger.error(f"Internal error: {error_msg}", exc_info=True)
+            RequestHandler.log_error(endpoint_name, error_msg, 500)
+            if debug_logger:
+                debug_logger.flush_on_error(500, error_msg)
+            if settings.debug_mode == "off":
+                detail = "服务器内部错误"
+            else:
+                detail = f"服务器内部错误: {error_msg}"
+            raise HTTPException(status_code=500, detail=detail)
+
+    @staticmethod
+    async def process_cc_request(
+        request: Request,
+        request_data: AnthropicMessagesRequest,
+        endpoint_name: str = "/cc/v1/messages"
+    ) -> StreamingResponse:
+        """
+        处理 Claude Code 兼容端点请求（缓冲模式）。
+
+        这个端点专为新版 Claude Code (2.1.9+) 设计：
+        - 始终使用流式响应
+        - 等待上游流完成后获取准确的 input_tokens
+        - 用真实值更正 message_start 事件
+        - 等待期间发送 ping 保活
+
+        Args:
+            request: FastAPI Request
+            request_data: Anthropic 请求数据
+            endpoint_name: 端点名称
+
+        Returns:
+            StreamingResponse（缓冲模式）
+        """
+        start_time = time.time()
+
+        # 获取 auth_manager 和 model_cache
+        auth_manager: KiroAuthManager = getattr(request.state, 'auth_manager', None) or request.app.state.auth_manager
+        model_cache: ModelInfoCache = request.app.state.model_cache
+
+        # 准备日志
+        RequestHandler.prepare_request_logging(request_data)
+
+        # 转换 Anthropic 请求为 OpenAI 格式
+        try:
+            openai_request = convert_anthropic_to_openai_request(request_data)
+        except Exception as e:
+            logger.error(f"Failed to convert Anthropic request: {e}")
+            raise HTTPException(status_code=400, detail=f"请求格式无效: {str(e)}")
+
+        # 生成会话 ID
+        conversation_id = generate_conversation_id()
+
+        # 获取 thinking 配置
+        thinking_config = getattr(request_data, 'thinking', None)
+        thinking_enabled = is_thinking_enabled(thinking_config)
+
+        # 构建 Kiro payload
+        try:
+            kiro_payload = build_kiro_payload(
+                openai_request,
+                conversation_id,
+                auth_manager.profile_arn or "",
+                thinking_config=thinking_config
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # 记录 Kiro 请求
+        RequestHandler.log_kiro_request(kiro_payload)
+
+        # 创建 HTTP 客户端
+        http_client = KiroHttpClient(auth_manager)
+        url = f"{auth_manager.api_host}/generateAssistantResponse"
+
+        try:
+            # 发送请求到 Kiro API
+            response = await http_client.request_with_retry(
+                "POST",
+                url,
+                kiro_payload,
+                stream=True,
+                model=request_data.model
+            )
+
+            if response.status_code != 200:
+                duration_ms = (time.time() - start_time) * 1000
+                metrics.record_request(
+                    endpoint=endpoint_name,
+                    status_code=response.status_code,
+                    duration_ms=duration_ms,
+                    model=request_data.model,
+                    is_stream=True,
+                    api_type="anthropic"
+                )
+                return await RequestHandler.handle_api_error(
+                    response,
+                    http_client,
+                    endpoint_name,
+                    "anthropic",
+                    request=request
+                )
+
+            # 准备 token 计数数据
+            messages_for_tokenizer, tools_for_tokenizer = RequestHandler.prepare_tokenizer_data(openai_request)
+
+            # 记录成功请求
+            duration_ms = (time.time() - start_time) * 1000
+            metrics.record_request(
+                endpoint=endpoint_name,
+                status_code=200,
+                duration_ms=duration_ms,
+                model=request_data.model,
+                is_stream=True,
+                api_type="anthropic"
+            )
+
+            # 使用缓冲流处理函数
+            return await RequestHandler.create_stream_response(
+                http_client,
+                response,
+                request_data.model,
+                model_cache,
+                auth_manager,
+                buffered_stream_kiro_to_anthropic,
+                endpoint_name,
+                messages_for_tokenizer,
+                tools_for_tokenizer,
+                thinking_enabled=thinking_enabled
+            )
+
+        except HTTPException as e:
+            await http_client.close()
+            duration_ms = (time.time() - start_time) * 1000
+            metrics.record_request(
+                endpoint=endpoint_name,
+                status_code=e.status_code,
+                duration_ms=duration_ms,
+                model=request_data.model,
+                is_stream=True,
+                api_type="anthropic"
+            )
+            RequestHandler.log_error(endpoint_name, e.detail, e.status_code)
+            if debug_logger:
+                debug_logger.flush_on_error(e.status_code, str(e.detail))
+            raise
+        except Exception as e:
+            await http_client.close()
+            duration_ms = (time.time() - start_time) * 1000
+            metrics.record_request(
+                endpoint=endpoint_name,
+                status_code=500,
+                duration_ms=duration_ms,
+                model=request_data.model,
+                is_stream=True,
+                api_type="anthropic"
+            )
+            error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
+            logger.error(f"Internal error in CC endpoint: {error_msg}", exc_info=True)
             RequestHandler.log_error(endpoint_name, error_msg, 500)
             if debug_logger:
                 debug_logger.flush_on_error(500, error_msg)

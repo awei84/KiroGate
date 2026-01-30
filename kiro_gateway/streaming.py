@@ -1261,3 +1261,355 @@ async def collect_anthropic_response(
             "output_tokens": completion_tokens
         }
     }
+
+
+# ==================================================================================================
+# Claude Code 兼容端点 (/cc/v1) - 缓冲模式
+# ==================================================================================================
+
+async def buffered_stream_kiro_to_anthropic(
+    client: httpx.AsyncClient,
+    response: httpx.Response,
+    model: str,
+    model_cache: "ModelInfoCache",
+    auth_manager: "KiroAuthManager",
+    request_messages: Optional[list] = None,
+    request_tools: Optional[list] = None,
+    thinking_enabled: bool = False,
+    stream_read_timeout: float = settings.stream_read_timeout,
+    ping_interval: float = 25.0
+) -> AsyncGenerator[str, None]:
+    """
+    缓冲模式的 Anthropic 流处理（适配新版 Claude Code 2.1.9+）。
+
+    与 stream_kiro_to_anthropic 的区别：
+    - 等待上游流完全结束后，获取准确的 input_tokens
+    - 用真实值更正 message_start 事件中的 input_tokens
+    - 然后一次性返回所有事件
+    - 等待期间每 ping_interval 秒发送 ping 事件保活
+
+    这解决了新版 Claude Code 依赖准确 input_tokens 进行自动上下文压缩的问题。
+
+    Args:
+        client: HTTP 客户端
+        response: HTTP 响应流
+        model: 模型名称
+        model_cache: 模型缓存
+        auth_manager: 认证管理器
+        request_messages: 请求消息（用于 token 计算回退）
+        request_tools: 请求工具（用于 token 计算回退）
+        thinking_enabled: 是否启用 thinking 模式
+        stream_read_timeout: 流读取超时（秒）
+        ping_interval: ping 保活间隔（秒），默认 25 秒
+
+    Yields:
+        Anthropic SSE 格式的事件字符串
+    """
+    message_id = generate_anthropic_message_id()
+    parser = AwsEventStreamParser()
+    metering_data = None
+    context_usage_percentage = None
+    content_parts: list[str] = []
+
+    # Thinking 解析器
+    thinking_parser = KiroThinkingTagParser() if thinking_enabled else None
+
+    # 自适应超时
+    adaptive_stream_read_timeout = get_adaptive_timeout(model, stream_read_timeout)
+
+    # 用于跟踪上游是否完成
+    upstream_done = asyncio.Event()
+    upstream_error: Optional[Exception] = None
+
+    async def read_upstream():
+        """后台任务：读取上游流数据。"""
+        nonlocal context_usage_percentage, metering_data, upstream_error
+
+        try:
+            byte_iterator = response.aiter_bytes()
+            consecutive_timeouts = 0
+            max_consecutive_timeouts = 3
+
+            while True:
+                try:
+                    chunk = await _read_chunk_with_timeout(byte_iterator, adaptive_stream_read_timeout)
+                    consecutive_timeouts = 0
+                except StopAsyncIteration:
+                    break
+                except StreamReadTimeoutError as e:
+                    consecutive_timeouts += 1
+                    if consecutive_timeouts <= max_consecutive_timeouts:
+                        logger.warning(
+                            f"[CC Buffered] Stream timeout {consecutive_timeouts}/{max_consecutive_timeouts} "
+                            f"after {adaptive_stream_read_timeout}s (model: {model}). Continuing..."
+                        )
+                        continue
+                    else:
+                        logger.error(f"[CC Buffered] Stream timeout exceeded max retries (model: {model})")
+                        raise
+
+                if debug_logger:
+                    debug_logger.log_raw_chunk(chunk)
+
+                events = parser.feed(chunk)
+
+                for event in events:
+                    if event["type"] == "content":
+                        content_parts.append(event["data"])
+                    elif event["type"] == "usage":
+                        metering_data = event["data"]
+                    elif event["type"] == "context_usage":
+                        context_usage_percentage = event["data"]
+
+        except Exception as e:
+            nonlocal upstream_error
+            upstream_error = e
+            logger.error(f"[CC Buffered] Upstream error: {e}")
+        finally:
+            upstream_done.set()
+            try:
+                await response.aclose()
+            except Exception:
+                pass
+
+    # 启动后台读取任务
+    read_task = asyncio.create_task(read_upstream())
+
+    try:
+        # 等待上游完成，同时发送 ping 保活
+        while not upstream_done.is_set():
+            try:
+                await asyncio.wait_for(upstream_done.wait(), timeout=ping_interval)
+            except asyncio.TimeoutError:
+                # 发送 ping 保活
+                yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
+                logger.debug(f"[CC Buffered] Sent ping while waiting for upstream (model: {model})")
+
+        # 确保读取任务完成
+        await read_task
+
+        # 检查上游错误
+        if upstream_error:
+            error_msg = str(upstream_error) if str(upstream_error) else f"{type(upstream_error).__name__}"
+            error_event = {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": error_msg
+                }
+            }
+            yield f"event: error\ndata: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+            return
+
+        # 合并内容
+        full_content = ''.join(content_parts)
+
+        # 计算真实的 token 使用量（使用 API 返回的 context_usage_percentage）
+        usage_info = _calculate_usage_tokens(
+            full_content, context_usage_percentage, model_cache, model,
+            request_messages, request_tools
+        )
+        input_tokens = usage_info["prompt_tokens"]
+        completion_tokens = usage_info["completion_tokens"]
+
+        logger.debug(
+            f"[CC Buffered] Token calculation complete: "
+            f"input_tokens={input_tokens} (source: {usage_info['prompt_source']}), "
+            f"output_tokens={completion_tokens}, "
+            f"context_usage_percentage={context_usage_percentage}"
+        )
+
+        # 处理 thinking 内容
+        thinking_content = ""
+        text_content = full_content
+
+        if thinking_enabled and thinking_parser:
+            segments = thinking_parser.push_and_parse(full_content)
+            final_segments = thinking_parser.flush()
+            all_segments = segments + final_segments
+
+            thinking_parts = []
+            text_parts = []
+
+            for segment in all_segments:
+                if segment.type == SegmentType.THINKING:
+                    thinking_parts.append(segment.content)
+                elif segment.type == SegmentType.TEXT:
+                    text_parts.append(segment.content)
+
+            thinking_content = ''.join(thinking_parts)
+            text_content = ''.join(text_parts)
+
+        # 处理 tool calls
+        bracket_tool_calls = parse_bracket_tool_calls(full_content)
+        all_tool_calls = parser.get_tool_calls() + bracket_tool_calls
+        all_tool_calls = deduplicate_tool_calls(all_tool_calls)
+
+        # ========== 开始输出缓冲的事件 ==========
+
+        # 1. message_start（使用准确的 input_tokens）
+        message_start = {
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": model,
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": input_tokens,  # 使用准确值
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        }
+        yield f"event: message_start\ndata: {json.dumps(message_start, ensure_ascii=False)}\n\n"
+
+        content_block_index = 0
+
+        # 2. thinking block（如果有）
+        if thinking_content:
+            # content_block_start
+            block_start = {
+                "type": "content_block_start",
+                "index": content_block_index,
+                "content_block": {"type": "thinking", "thinking": ""}
+            }
+            yield f"event: content_block_start\ndata: {json.dumps(block_start, ensure_ascii=False)}\n\n"
+
+            # thinking_delta（一次性输出全部）
+            delta = {
+                "type": "content_block_delta",
+                "index": content_block_index,
+                "delta": {"type": "thinking_delta", "thinking": thinking_content}
+            }
+            yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+
+            # content_block_stop
+            block_stop = {
+                "type": "content_block_stop",
+                "index": content_block_index
+            }
+            yield f"event: content_block_stop\ndata: {json.dumps(block_stop, ensure_ascii=False)}\n\n"
+
+            content_block_index += 1
+
+        # 3. text block（如果有）
+        if text_content:
+            # content_block_start
+            block_start = {
+                "type": "content_block_start",
+                "index": content_block_index,
+                "content_block": {"type": "text", "text": ""}
+            }
+            yield f"event: content_block_start\ndata: {json.dumps(block_start, ensure_ascii=False)}\n\n"
+
+            # text_delta（一次性输出全部）
+            delta = {
+                "type": "content_block_delta",
+                "index": content_block_index,
+                "delta": {"type": "text_delta", "text": text_content}
+            }
+            yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+
+            # content_block_stop
+            block_stop = {
+                "type": "content_block_stop",
+                "index": content_block_index
+            }
+            yield f"event: content_block_stop\ndata: {json.dumps(block_stop, ensure_ascii=False)}\n\n"
+
+            content_block_index += 1
+
+        # 4. tool_use blocks（如果有）
+        for tc in all_tool_calls:
+            func = tc.get("function") or {}
+            tool_name = func.get("name") or ""
+            tool_args_str = func.get("arguments") or "{}"
+            tool_id = tc.get("id") or f"toolu_{generate_completion_id()[8:]}"
+
+            try:
+                tool_input = json.loads(tool_args_str)
+            except json.JSONDecodeError:
+                tool_input = {}
+
+            # content_block_start
+            tool_block_start = {
+                "type": "content_block_start",
+                "index": content_block_index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": tool_id,
+                    "name": tool_name,
+                    "input": {}
+                }
+            }
+            yield f"event: content_block_start\ndata: {json.dumps(tool_block_start, ensure_ascii=False)}\n\n"
+
+            # input_json_delta
+            if tool_input:
+                input_delta = {
+                    "type": "content_block_delta",
+                    "index": content_block_index,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": json.dumps(tool_input, ensure_ascii=False)
+                    }
+                }
+                yield f"event: content_block_delta\ndata: {json.dumps(input_delta, ensure_ascii=False)}\n\n"
+
+            # content_block_stop
+            tool_block_stop = {
+                "type": "content_block_stop",
+                "index": content_block_index
+            }
+            yield f"event: content_block_stop\ndata: {json.dumps(tool_block_stop, ensure_ascii=False)}\n\n"
+
+            content_block_index += 1
+
+        # 5. message_delta
+        stop_reason = "tool_use" if all_tool_calls else "end_turn"
+        message_delta = {
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": stop_reason,
+                "stop_sequence": None
+            },
+            "usage": {
+                "output_tokens": completion_tokens
+            }
+        }
+        yield f"event: message_delta\ndata: {json.dumps(message_delta, ensure_ascii=False)}\n\n"
+
+        # 6. message_stop
+        yield f"event: message_stop\ndata: {{\"type\": \"message_stop\"}}\n\n"
+
+        logger.info(
+            f"[CC Buffered] Complete: model={model}, input_tokens={input_tokens}, "
+            f"output_tokens={completion_tokens}, has_thinking={bool(thinking_content)}, "
+            f"tool_calls={len(all_tool_calls)}"
+        )
+
+    except Exception as e:
+        error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
+        logger.error(f"[CC Buffered] Error: {error_msg}", exc_info=True)
+        error_event = {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": error_msg
+            }
+        }
+        yield f"event: error\ndata: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+    finally:
+        # 确保清理
+        if not read_task.done():
+            read_task.cancel()
+            try:
+                await read_task
+            except asyncio.CancelledError:
+                pass
+        logger.debug("[CC Buffered] Streaming completed")

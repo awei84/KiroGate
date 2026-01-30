@@ -41,3 +41,4 @@ data/
 
 # Excluded docs
 docs/excdoc/
+.ace-tool/

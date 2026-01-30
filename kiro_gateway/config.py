@@ -159,6 +159,18 @@ class Settings(BaseSettings):
     tool_description_max_length: int = Field(default=10000, alias="TOOL_DESCRIPTION_MAX_LENGTH")
 
     # ==================================================================================================
+    # 输出限制提示注入（解决 Write Failed / 会话卡死问题）
+    # ==================================================================================================
+
+    # 是否启用输出限制提示注入
+    # 启用后会在 system prompt 中注入警告，避免模型输出过长被截断
+    inject_output_limit_warning: bool = Field(default=True, alias="INJECT_OUTPUT_LIMIT_WARNING")
+
+    # 输出 token 限制（用于提示注入）
+    # Kiro/AWS 上游的实际限制约为 8192-16000 tokens
+    output_token_limit: int = Field(default=8192, alias="OUTPUT_TOKEN_LIMIT")
+
+    # ==================================================================================================
     # 日志设置
     # ==================================================================================================
 
